@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
@@ -298,10 +297,10 @@ func shellQuote(value string) string {
 }
 
 func clearCloseOnExec(fd int) error {
-	flags, err := syscall.FcntlInt(fd, syscall.F_GETFD, 0)
-	if err != nil {
-		return err
+	flags, _, errno := unix.Syscall(unix.F_GETFD, uintptr(fd), 0, 0)
+	if errno != 0 {
+		return errno
 	}
-	_, err = syscall.FcntlInt(fd, syscall.F_SETFD, flags&^syscall.FD_CLOEXEC)
-	return err
+	_, _, errno = unix.Syscall(unix.F_SETFD, uintptr(fd), flags&^unix.FD_CLOEXEC, 0)
+	return errno
 }
