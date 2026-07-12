@@ -236,7 +236,7 @@ Re-run TC-08 with `hack/e2e/helm-values-staging.yaml` (`hostPID: true`) and Phas
 
 **Root cause:** Workload container mount namespaces on k3s cannot execute the CSI `rcloneplugin` helper (not at `/rcloneplugin`, not via `/proc/self/fd/N`, not via `/proc/<csi-pid>/root`, not via `/proc/1/root/var/lib/kubelet/...`). `move_mount(2)` on inherited `open_tree` fd requires a process inside the container mnt ns; `setns(2)` from Go subprocess returns `EINVAL`; `nsenter` can enter the ns but cannot exec the helper binary.
 
-**Commits (Phase D fixes, branch `feat/nodestagevolume-staging`):** `80d1ba5`, `8d9eb8a`, `aba7a61`, `989e1e9`, `8090605`, `6e91ed8` (latest HEAD reverts host-helper path; still blocked on helper exec in container mnt ns).
+**Commits (Phase D fixes, branch `feat/nodestagevolume-staging`):** `80d1ba5` … `898e23e` (latest: `nsenter -F` + `open_tree` fd inherit; v7 `setns` helper still `EINVAL`; v8 `clear CLOEXEC` fd bug fixed in `898e23e` — retest pending).
 
 **Note:** One interim run showed `kubectl exec` I/O + host sentinel OK for `e2e-writer` only, but an external deployment rollout recreated pods during the test window — not a valid TC-08 PASS.
 
