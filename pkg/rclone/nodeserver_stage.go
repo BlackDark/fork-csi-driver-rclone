@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -28,6 +29,9 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 )
+
+// stageVolumeHealthCheck overrides isMountHealthy during stageVolume (tests only).
+var stageVolumeHealthCheck func(*NodeServer, string) (bool, string)
 
 func validateStageVolumeRequest(req *csi.NodeStageVolumeRequest) error {
 	if len(req.GetVolumeId()) == 0 {
@@ -67,6 +71,29 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
+func (ns *NodeServer) stageMountHealthy(stagingPath string) (bool, string) {
+	if stageVolumeHealthCheck != nil {
+		return stageVolumeHealthCheck(ns, stagingPath)
+	}
+	return ns.isMountHealthy(stagingPath)
+}
+
+func (ns *NodeServer) cleanupUnhealthyStagingMount(stagingPath string) error {
+	if mc := ns.getMountContext(stagingPath); mc != nil {
+		if err := ns.unmountVolume(mc, stagingPath); err != nil {
+			klog.Warningf("Failed to unmount unhealthy staging mount at %s: %v", stagingPath, err)
+		}
+		ns.deleteMountContext(stagingPath)
+	}
+	if err := ns.forceCleanupMount(stagingPath); err != nil {
+		return status.Errorf(codes.Internal, "failed to cleanup unhealthy staging mount: %v", err)
+	}
+	if err := os.MkdirAll(stagingPath, 0755); err != nil {
+		return status.Errorf(codes.Internal, "failed to recreate staging directory after cleanup: %v", err)
+	}
+	return nil
+}
+
 func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) error {
 	volumeID := req.GetVolumeId()
 	stagingPath := req.GetStagingTargetPath()
@@ -75,12 +102,38 @@ func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeR
 		if sv.stagingPath != stagingPath {
 			return status.Errorf(codes.FailedPrecondition, "volume %s already staged at %s", volumeID, sv.stagingPath)
 		}
-		if healthy, msg := ns.isMountHealthy(stagingPath); healthy {
+		healthy, healthMsg := ns.stageMountHealthy(stagingPath)
+		if healthy {
 			klog.V(2).Infof("Volume %s already staged at %s", volumeID, stagingPath)
 			return nil
-		} else {
-			klog.Warningf("Staged volume %s at %s is unhealthy: %s", volumeID, stagingPath, msg)
-			ns.deleteStagedVolume(volumeID)
+		}
+		klog.Warningf("Staged volume %s at %s is unhealthy: %s", volumeID, stagingPath, healthMsg)
+		ns.deleteStagedVolume(volumeID)
+		if err := ns.cleanupUnhealthyStagingMount(stagingPath); err != nil {
+			return err
+		}
+	}
+
+	if err := ns.prepareTargetDirectory(stagingPath, volumeID); err != nil {
+		if !errors.Is(err, errMountAlreadyHealthy) {
+			return err
+		}
+		if healthy, _ := ns.stageMountHealthy(stagingPath); healthy {
+			mc := ns.getMountContext(stagingPath)
+			ns.setStagedVolume(volumeID, &stagedVolume{
+				volumeID:    volumeID,
+				stagingPath: stagingPath,
+				mountCtx:    mc,
+			})
+			klog.V(2).Infof("Rebuilt staged volume cache for %s at %s", volumeID, stagingPath)
+			return nil
+		}
+		if err := ns.forceCleanupMount(stagingPath); err != nil {
+			return status.Errorf(codes.Internal, "failed to cleanup stale staging mount before remount: %v", err)
+		}
+		ns.deleteMountContext(stagingPath)
+		if err := os.MkdirAll(stagingPath, 0755); err != nil {
+			return status.Errorf(codes.Internal, "failed to recreate staging directory after cleanup: %v", err)
 		}
 	}
 
@@ -110,20 +163,6 @@ func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeR
 	pvp, err := extractPublishParams(params)
 	if err != nil {
 		return err
-	}
-
-	if err := ns.prepareTargetDirectory(stagingPath, volumeID); err != nil {
-		if !errors.Is(err, errMountAlreadyHealthy) {
-			return err
-		}
-		mc := ns.getMountContext(stagingPath)
-		ns.setStagedVolume(volumeID, &stagedVolume{
-			volumeID:    volumeID,
-			stagingPath: stagingPath,
-			mountCtx:    mc,
-		})
-		klog.V(2).Infof("Rebuilt staged volume cache for %s at %s", volumeID, stagingPath)
-		return nil
 	}
 
 	klog.V(2).Infof("NodeStageVolume: mounting %s:%s at %s", pvp.remoteName, pvp.remotePath, stagingPath)

@@ -139,3 +139,40 @@ func TestNodeStageVolumeRebuildsCacheForHealthyMount(t *testing.T) {
 	assert.False(t, mountCalled)
 	assert.NotNil(t, ns.getStagedVolume("vol-healthy"))
 }
+
+func TestNodeStageVolumeRemountsAfterUnhealthyCachedStage(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	stagingPath := t.TempDir()
+	require.NoError(t, fm.Mount("test", stagingPath, "", nil))
+
+	ns.setStagedVolume("vol-unhealthy", &stagedVolume{
+		volumeID:    "vol-unhealthy",
+		stagingPath: stagingPath,
+		mountCtx:    &mountContext{remoteName: testRemote},
+	})
+	ns.setMountContext(stagingPath, &mountContext{remoteName: testRemote})
+
+	stageVolumeHealthCheck = func(_ *NodeServer, _ string) (bool, string) {
+		return false, "VFS errors detected: 3"
+	}
+	t.Cleanup(func() { stageVolumeHealthCheck = nil })
+
+	mountCalled := false
+	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+		mountCalled = true
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		return nil, cancelCtx, cancel, fm.Mount("test", targetPath, "", nil)
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "vol-unhealthy",
+		StagingTargetPath: stagingPath,
+		VolumeCapability:  testMountCapability(),
+		Secrets:           testSecrets(),
+	})
+
+	require.NoError(t, err)
+	assert.True(t, mountCalled)
+	assert.NotNil(t, ns.getStagedVolume("vol-unhealthy"))
+	assert.NotNil(t, ns.getMountContext(stagingPath))
+}
