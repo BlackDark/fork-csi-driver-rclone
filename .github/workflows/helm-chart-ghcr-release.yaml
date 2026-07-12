@@ -6,6 +6,11 @@ on:
       - 'v*'
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Chart version without v prefix (e.g. 0.3.0-rc1)'
+        required: true
   pull_request:
     branches:
       - main
@@ -32,18 +37,13 @@ jobs:
           fetch-depth: 0
 
       - name: Install dependencies
-        run: |
-          apk add --no-cache yq bash
+        run: apk add --no-cache yq bash
 
       - name: Lint chart
-        run: |
-          set -euo pipefail
-          helm lint "${CHART_PATH}" --strict
+        run: helm lint "${CHART_PATH}" --strict
 
       - name: Validate chart templates
-        run: |
-          set -euo pipefail
-          helm template test "${CHART_PATH}" > /dev/null
+        run: helm template test "${CHART_PATH}" > /dev/null
 
   publish-ghcr:
     runs-on: ubuntu-latest
@@ -58,32 +58,34 @@ jobs:
           fetch-depth: 0
 
       - name: Install dependencies
-        run: |
-          apk add --no-cache yq bash
+        run: apk add --no-cache yq bash
 
       - name: Determine version
         id: version
         run: |
-          set -x  # Enable debug output
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${VERSION#v}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
-            echo "📦 Using version from tag: ${VERSION}"
-            echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-            # For tagged releases, appVersion should match the tag version
-            echo "app_version=${VERSION}" >> "${GITHUB_OUTPUT}"
-            echo "✅ Version set to: ${VERSION}"
-            echo "✅ AppVersion set to: ${VERSION}"
           else
             VERSION=$(yq eval '.version' "${CHART_PATH}/Chart.yaml")
-            echo "📦 Using version from Chart.yaml: ${VERSION}"
-            echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-            # Extract appVersion from Chart.yaml
-            APP_VERSION=$(yq eval '.appVersion' "${CHART_PATH}/Chart.yaml")
-            echo "📦 Using appVersion from Chart.yaml: ${APP_VERSION}"
-            echo "app_version=${APP_VERSION}" >> "${GITHUB_OUTPUT}"
-            echo "✅ Version set to: ${VERSION}"
-            echo "✅ AppVersion set to: ${APP_VERSION}"
           fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "app_version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Patch chart for fork registry
+        run: |
+          set -euo pipefail
+          DRIVER_IMAGE="ghcr.io/${{ github.repository }}"
+          OPERATOR_IMAGE="ghcr.io/${{ github.repository }}-volume-recovery-operator"
+          yq -i ".version = \"${{ steps.version.outputs.version }}\"" "${CHART_PATH}/Chart.yaml"
+          yq -i ".appVersion = \"${{ steps.version.outputs.app_version }}\"" "${CHART_PATH}/Chart.yaml"
+          yq -i ".image.rclone.repository = \"${DRIVER_IMAGE}\"" "${CHART_PATH}/values.yaml"
+          yq -i ".volumeRecoveryOperator.image.repository = \"${OPERATOR_IMAGE}\"" "${CHART_PATH}/values.yaml"
+          yq -i ".home = \"https://github.com/${{ github.repository }}\"" "${CHART_PATH}/Chart.yaml"
+          yq -i ".sources[0] = \"https://github.com/${{ github.repository }}\"" "${CHART_PATH}/Chart.yaml"
 
       - name: Push Helm chart to GHCR
         id: push
@@ -102,48 +104,19 @@ jobs:
       - name: Summary
         run: |
           cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
-          ## 🚀 Helm Chart Published to GHCR
+          ## Helm chart published
 
-          **Image:** \`${{ steps.push.outputs.image }}\`
+          **Chart:** \`oci://ghcr.io/${{ github.repository_owner }}/charts/csi-driver-rclone\`
           **Version:** \`${{ steps.version.outputs.version }}\`
 
-          ### Installation Instructions
-
-          **Install latest version:**
           \`\`\`bash
-          helm install csi-rclone oci://ghcr.io/${{ github.repository_owner }}/charts/csi-driver-rclone \\
-            --namespace veloxpack --create-namespace
-          \`\`\`
-
-          **Install specific version:**
-          \`\`\`bash
-          helm install csi-rclone oci://ghcr.io/${{ github.repository_owner }}/charts/csi-driver-rclone \\
+          helm upgrade --install csi-rclone oci://ghcr.io/${{ github.repository_owner }}/charts/csi-driver-rclone \\
             --version ${{ steps.version.outputs.version }} \\
-            --namespace veloxpack --create-namespace
+            --namespace veloxpack --create-namespace \\
+            -f hack/e2e/helm-values-fork-ghcr.yaml
           \`\`\`
 
-          ### FluxCD HelmRepository
-
-          \`\`\`yaml
-          apiVersion: source.toolkit.fluxcd.io/v1
-          kind: HelmRepository
-          metadata:
-            name: csi-driver-rclone
-            namespace: flux-system
-          spec:
-            interval: 1h
-            type: oci
-            url: oci://ghcr.io/${{ github.repository_owner }}/charts
-          \`\`\`
-
-          ### Make Package Public
-
-          📝 **Important:** By default, packages are private. To make this chart publicly accessible:
-
-          1. Go to: https://github.com/${{ github.repository_owner }}/packages
-          2. Click on the \`charts/csi-driver-rclone\` package
-          3. Click "Package settings"
-          4. Scroll to "Danger Zone"
-          5. Click "Change visibility" → Select "Public"
+          Images default to this fork:
+          - \`ghcr.io/${{ github.repository }}:v${{ steps.version.outputs.version }}\`
+          - \`ghcr.io/${{ github.repository }}-volume-recovery-operator:v${{ steps.version.outputs.version }}\`
           EOF
-

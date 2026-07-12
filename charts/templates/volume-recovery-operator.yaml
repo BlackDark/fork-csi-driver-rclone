@@ -1,0 +1,100 @@
+{{- if .Values.volumeRecoveryOperator.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.volumeRecoveryOperator.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- include "rclone.labels" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.volumeRecoveryOperator.name }}
+  {{- include "rclone.labels" . | nindent 2 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.volumeRecoveryOperator.name }}
+  {{- include "rclone.labels" . | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.volumeRecoveryOperator.name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.volumeRecoveryOperator.name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Values.volumeRecoveryOperator.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- include "rclone.labels" . | nindent 2 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.volumeRecoveryOperator.name }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.volumeRecoveryOperator.name }}
+        {{- include "rclone.commonLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.volumeRecoveryOperator.name }}
+      priorityClassName: system-node-critical
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - operator: Exists
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: operator
+          image: {{ .Values.volumeRecoveryOperator.image.repository }}:{{ include "rclone.volumeRecoveryOperatorImageTag" . }}
+          imagePullPolicy: {{ .Values.volumeRecoveryOperator.image.pullPolicy }}
+          command: ["/volume-recovery-operator"]
+          args:
+            - --kubelet-dir={{ .Values.kubeletDir }}
+            - --provisioner={{ .Values.volumeRecoveryOperator.provisioner }}
+            - --scan-interval={{ .Values.volumeRecoveryOperator.scanInterval }}
+            - --v={{ .Values.volumeRecoveryOperator.logLevel }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+              drop: ["ALL"]
+            allowPrivilegeEscalation: true
+          volumeMounts:
+            - name: kubelet-pods
+              mountPath: {{ .Values.kubeletDir }}/pods
+              readOnly: true
+          resources:
+            {{- toYaml .Values.volumeRecoveryOperator.resources | nindent 12 }}
+      volumes:
+        - name: kubelet-pods
+          hostPath:
+            path: {{ .Values.kubeletDir }}/pods
+            type: Directory
+{{- end }}
