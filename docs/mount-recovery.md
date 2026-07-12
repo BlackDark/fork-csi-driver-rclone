@@ -25,24 +25,36 @@ If the driver OOMs, FUSE mounts can become stale (kernel mount entry remains but
 - Use a hostPath or emptyDir for `cache_dir` / `temp_dir` to keep page cache pressure out of the container cgroup
 - Increase `node.resources.rclone.limits.memory` before raising cache sizes
 
-## mountPropagation for application pods
+## mountPropagation (optional, not sufficient alone)
 
-CSI mounts the volume at the kubelet path (`/var/lib/kubelet/pods/.../mount`). Application containers only see the volume if it is propagated into the pod mount namespace.
+CSI mounts the volume at the kubelet path (`/var/lib/kubelet/pods/.../mount`). Application containers receive a bind mount at `volumeMount.mountPath`.
 
-For workloads that must survive CSI driver restarts without pod restart, set on the **workload** pod spec:
+`mountPropagation: HostToContainer` does **not** reliably fix stale FUSE mounts after CSI restart (see integration TC-08). Do not depend on it for zero-downtime recovery.
+
+## Container mount namespace remount (Phase D)
+
+When staging and remount are enabled, the CSI node pod can enter workload container mount namespaces after host recovery and replace stale `fuse.rclone` mounts with the recovered staging mount (`setns` + `open_tree`/`move_mount`, SeaweedFS #255/#267 pattern).
+
+Requirements:
 
 ```yaml
-securityContext:
-  # ...
-volumeMounts:
-  - name: data
-    mountPath: /data
-    mountPropagation: HostToContainer
+node:
+  staging:
+    enabled: true
+  remount:
+    enabled: true
+  hostPID: true   # auto-enabled when staging+remount; required for container PID discovery
 ```
 
-`HostToContainer` propagates host (kubelet) mounts into the container. Without propagation, a remounted CSI path may not appear inside the app container until the pod is recreated.
+The CSI node DaemonSet must run `privileged` with `SYS_ADMIN` (existing default).
 
-**Note:** Zero-downtime recovery inside running app containers is not possible without `mountPropagation: HostToContainer` (or `Bidirectional` where appropriate).
+### Limitations
+
+- **`volumeMount.subPath`:** not supported; pod restart required
+- **`hostPID: false`:** container remount skipped; use volume recovery operator
+- **Non-Linux nodes:** not supported
+- **Open file descriptors** on the dead mount stay stale until the app reopens them
+- **Direct publish mode** (staging disabled): container remount not implemented
 
 ## Driver self-healing (Phase A)
 
@@ -66,11 +78,9 @@ node:
     enabled: true
 ```
 
-In this mode, `NodeStageVolume` owns the FUSE mount and persists the staging path for boot-time remount. `NodePublishVolume` only creates a bind mount from staging to the pod path. After a CSI node pod restart, persisted remount restores the staging FUSE mount; subsequent publish calls can rebuild in-memory staging state from the healthy staging mount or restage if the mount is stale.
+In this mode, `NodeStageVolume` owns the FUSE mount and persists the staging path for boot-time remount. `NodePublishVolume` only creates a bind mount from staging to the pod path. After a CSI node pod restart, persisted remount restores the staging FUSE mount, refreshes kubelet publish binds, and (with Phase D + `hostPID`) remounts inside running workload containers.
 
-Staging improves the CSI stage/publish split and kubelet-path recovery, but it does **not** yet eliminate the need for the volume recovery operator or a workload pod restart after a CSI node pod restart (integration TC-08 currently fails). Running application containers can still hold stale bind mounts or dead FUSE file descriptors until the pod is recreated.
-
-With workload `mountPropagation: HostToContainer`, refreshed kubelet mounts may propagate into running containers in some cases, but that is not sufficient for zero-downtime recovery today. Workloads without mount propagation still need a pod restart; the volume recovery operator remains required for automated recovery after CSI restarts.
+Without Phase D or when `hostPID` is disabled, the volume recovery operator or a workload pod restart is still required.
 
 ### Upgrade path
 
@@ -88,12 +98,12 @@ The optional **volume recovery operator** is a node-local DaemonSet that complem
 
 ### When to use it
 
-- Workloads **without** `mountPropagation: HostToContainer` cannot see a remounted kubelet path until the pod is recreated.
-- After CSI driver OOM/restart, app containers may still hold dead FUSE file descriptors even when the kubelet mount is healthy.
+- Fallback when Phase D container remount is unavailable (`hostPID` disabled, `subPath` mounts, or remount failure)
+- After CSI driver OOM/restart when app containers still hold dead FUSE file descriptors
 
 The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node, reuses `IsMountPathCorrupted` from the driver, and deletes affected workload pods so controllers recreate them.
 
-When Phase B remount keeps kubelet paths healthy, the operator also watches for **CSI node pod restarts** on the same node and restarts workload pods that use rclone volumes. Container bind mounts cannot be refreshed in-place without `mountPropagation` or a pod restart.
+When Phase B/D remount keeps mounts healthy, the operator also watches for **CSI node pod restarts** on the same node and restarts workload pods that use rclone volumes as a safety net.
 
 ### Safety rails
 
