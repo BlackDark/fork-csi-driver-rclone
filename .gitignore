@@ -29,3 +29,6 @@ go.work
 
 # Local git worktrees
 .worktrees/
+
+# Built operator binary (local artifact)
+/volume-recovery-operator

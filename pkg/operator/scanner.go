@@ -23,8 +23,8 @@ import (
 	"strings"
 
 	"github.com/veloxpack/csi-driver-rclone/pkg/rclone"
-	mount "k8s.io/mount-utils"
 	"k8s.io/klog/v2"
+	mount "k8s.io/mount-utils"
 )
 
 const (

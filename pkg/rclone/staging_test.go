@@ -122,7 +122,9 @@ func TestGetDefaultStagingPathUsesDriverName(t *testing.T) {
 func TestRefreshPublishBindsRebindsMountFromStagingPath(t *testing.T) {
 	ns, fm := newTestNodeServerWithStaging(t)
 	kubeletDir := t.TempDir()
-	stagingPath := filepath.Join(kubeletDir, "plugins", "kubernetes.io", "csi", DefaultDriverName, "pv", "vol-refresh", "globalmount")
+	stagingPath := filepath.Join(
+		kubeletDir, "plugins", "kubernetes.io", "csi", DefaultDriverName, "pv", "vol-refresh", "globalmount",
+	)
 	require.NoError(t, os.MkdirAll(stagingPath, 0755))
 	oldPodsDir := kubeletPodsDir
 	kubeletPodsDir = filepath.Join(kubeletDir, "pods")
@@ -152,8 +154,12 @@ func TestRemountStateRebuildsStagingCacheAndRefreshesBindsWhenAlreadyHealthy(t *
 	ns, fm := newTestNodeServerWithStaging(t)
 	kubeletDir := t.TempDir()
 	volumeID := "minio#pvc-healthy-refresh"
-	stagingPath := filepath.Join(kubeletDir, "plugins", "kubernetes.io", "csi", DefaultDriverName, "pv", "hashed-volume-id", "globalmount")
-	publishPath := filepath.Join(kubeletDir, "pods", "pod-1", "volumes", "kubernetes.io~csi", "pvc-healthy-refresh", "mount")
+	stagingPath := filepath.Join(
+		kubeletDir, "plugins", "kubernetes.io", "csi", DefaultDriverName, "pv", "hashed-volume-id", "globalmount",
+	)
+	publishPath := filepath.Join(
+		kubeletDir, "pods", "pod-1", "volumes", "kubernetes.io~csi", "pvc-healthy-refresh", "mount",
+	)
 	require.NoError(t, os.MkdirAll(stagingPath, 0755))
 	require.NoError(t, os.MkdirAll(publishPath, 0755))
 	oldPodsDir := kubeletPodsDir
@@ -163,7 +169,9 @@ func TestRemountStateRebuildsStagingCacheAndRefreshesBindsWhenAlreadyHealthy(t *
 	require.NoError(t, fm.Mount(stagingPath, publishPath, "", []string{"bind"}))
 
 	mountCalled := false
-	ns.mountFilesystem = func(_ string, _ string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+	ns.mountFilesystem = func(_ string, _ string, _ []string, _ map[string]string) (
+		*mountlib.MountPoint, context.Context, context.CancelFunc, error,
+	) {
 		mountCalled = true
 		return nil, nil, nil, nil
 	}

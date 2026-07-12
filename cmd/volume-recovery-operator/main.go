@@ -26,18 +26,21 @@ import (
 
 	"github.com/veloxpack/csi-driver-rclone/pkg/operator"
 	"github.com/veloxpack/csi-driver-rclone/pkg/rclone"
-	mount "k8s.io/mount-utils"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	mount "k8s.io/mount-utils"
 )
 
 var (
-	kubeletDir         = flag.String("kubelet-dir", "/var/lib/kubelet", "Kubelet state directory")
-	provisioner        = flag.String("provisioner", rclone.DefaultDriverName, "CSI driver name to recover")
-	scanInterval       = flag.Duration("scan-interval", 60*time.Second, "Interval between stale mount scans")
-	nodeName           = flag.String("node-name", "", "Kubernetes node name (defaults to NODE_NAME env)")
-	csiNodeLabel       = flag.String("csi-node-label", operator.DefaultCSINodeLabelSelector(), "Label selector for CSI node pods")
+	kubeletDir   = flag.String("kubelet-dir", "/var/lib/kubelet", "Kubelet state directory")
+	provisioner  = flag.String("provisioner", rclone.DefaultDriverName, "CSI driver name to recover")
+	scanInterval = flag.Duration("scan-interval", 60*time.Second, "Interval between stale mount scans")
+	nodeName     = flag.String("node-name", "", "Kubernetes node name (defaults to NODE_NAME env)")
+	csiNodeLabel = flag.String(
+		"csi-node-label", operator.DefaultCSINodeLabelSelector(),
+		"Label selector for CSI node pods",
+	)
 	csiRestartRecovery = flag.Bool("csi-restart-recovery", true, "Restart workload pods when the CSI node pod restarts")
 )
 

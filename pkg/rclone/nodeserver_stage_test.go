@@ -69,7 +69,9 @@ type inMemorySecretClient struct {
 	items map[string]*corev1.Secret
 }
 
-func (c *inMemorySecretClient) Create(_ context.Context, secret *corev1.Secret, _ metav1.CreateOptions) (*corev1.Secret, error) {
+func (c *inMemorySecretClient) Create(
+	_ context.Context, secret *corev1.Secret, _ metav1.CreateOptions,
+) (*corev1.Secret, error) {
 	if c.items == nil {
 		c.items = make(map[string]*corev1.Secret)
 	}
@@ -84,7 +86,9 @@ func (c *inMemorySecretClient) Create(_ context.Context, secret *corev1.Secret, 
 	return copied.DeepCopy(), nil
 }
 
-func (c *inMemorySecretClient) Update(ctx context.Context, secret *corev1.Secret, opts metav1.UpdateOptions) (*corev1.Secret, error) {
+func (c *inMemorySecretClient) Update(
+	ctx context.Context, secret *corev1.Secret, opts metav1.UpdateOptions,
+) (*corev1.Secret, error) {
 	return c.Create(ctx, secret, metav1.CreateOptions{})
 }
 
@@ -114,11 +118,15 @@ func (c *inMemorySecretClient) Watch(context.Context, metav1.ListOptions) (watch
 	return watch.NewEmptyWatch(), nil
 }
 
-func (c *inMemorySecretClient) Patch(context.Context, string, types.PatchType, []byte, metav1.PatchOptions, ...string) (*corev1.Secret, error) {
+func (c *inMemorySecretClient) Patch(
+	context.Context, string, types.PatchType, []byte, metav1.PatchOptions, ...string,
+) (*corev1.Secret, error) {
 	return nil, nil
 }
 
-func (c *inMemorySecretClient) Apply(context.Context, *applycorev1.SecretApplyConfiguration, metav1.ApplyOptions) (*corev1.Secret, error) {
+func (c *inMemorySecretClient) Apply(
+	context.Context, *applycorev1.SecretApplyConfiguration, metav1.ApplyOptions,
+) (*corev1.Secret, error) {
 	return nil, nil
 }
 
@@ -132,7 +140,9 @@ func newTestNodeServerWithStaging(t *testing.T) (*NodeServer, *recordingMounter)
 		Driver:  d,
 		mounter: fm,
 	}
-	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (
+		*mountlib.MountPoint, context.Context, context.CancelFunc, error,
+	) {
 		cancelCtx, cancel := context.WithCancel(context.Background())
 		return nil, cancelCtx, cancel, fm.Mount("test", targetPath, "", nil)
 	}
@@ -244,7 +254,9 @@ func TestNodeStageVolumeRebuildsCacheForHealthyMount(t *testing.T) {
 	require.NoError(t, fm.Mount("test", stagingPath, "", nil))
 
 	mountCalled := false
-	ns.mountFilesystem = func(_ string, _ string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+	ns.mountFilesystem = func(_ string, _ string, _ []string, _ map[string]string) (
+		*mountlib.MountPoint, context.Context, context.CancelFunc, error,
+	) {
 		mountCalled = true
 		return nil, nil, nil, nil
 	}
@@ -279,7 +291,9 @@ func TestNodeStageVolumeRemountsAfterUnhealthyCachedStage(t *testing.T) {
 	t.Cleanup(func() { stageVolumeHealthCheck = nil })
 
 	mountCalled := false
-	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (
+		*mountlib.MountPoint, context.Context, context.CancelFunc, error,
+	) {
 		mountCalled = true
 		cancelCtx, cancel := context.WithCancel(context.Background())
 		return nil, cancelCtx, cancel, fm.Mount("test", targetPath, "", nil)
@@ -327,7 +341,9 @@ func TestRemountStateUsesStagingPath(t *testing.T) {
 	stagingPath := testStagingPath(t)
 	targetPath := t.TempDir()
 	var mountedPath string
-	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (
+		*mountlib.MountPoint, context.Context, context.CancelFunc, error,
+	) {
 		mountedPath = targetPath
 		cancelCtx, cancel := context.WithCancel(context.Background())
 		return nil, cancelCtx, cancel, fm.Mount("test", targetPath, "", nil)
@@ -393,7 +409,9 @@ func TestNodePublishVolumeRebuildsCacheForHealthyStagingMount(t *testing.T) {
 	require.NoError(t, fm.Mount("test", stagingPath, "", nil))
 
 	mountCalled := false
-	ns.mountFilesystem = func(_ string, _ string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+	ns.mountFilesystem = func(_ string, _ string, _ []string, _ map[string]string) (
+		*mountlib.MountPoint, context.Context, context.CancelFunc, error,
+	) {
 		mountCalled = true
 		return nil, nil, nil, nil
 	}

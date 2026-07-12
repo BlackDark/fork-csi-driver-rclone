@@ -78,12 +78,17 @@ type mountContext struct {
 	ctx        context.Context      // Context for mount goroutines
 }
 
+// mountFilesystemFn mounts an rclone filesystem at targetPath (test seam).
+type mountFilesystemFn func(
+	string, string, []string, map[string]string,
+) (*mountlib.MountPoint, context.Context, context.CancelFunc, error)
+
 // NodeServer implements the CSI Node service
 type NodeServer struct {
 	Driver            *Driver
 	mounter           mount.Interface
 	mountContext      map[string]*mountContext
-	mountFilesystem   func(string, string, []string, map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error)
+	mountFilesystem   mountFilesystemFn
 	stagedVolumes     map[string]*stagedVolume
 	mountStateManager *MountStateManager
 	mu                sync.RWMutex
@@ -309,7 +314,10 @@ func (ns *NodeServer) prepareTargetDirectory(targetPath string, volumeID string)
 			return errMountAlreadyHealthy
 		}
 
-		klog.Warningf("Mount point %s appears mounted but is not accessible (err: %v), attempting recovery", targetPath, readErr)
+		klog.Warningf(
+			"Mount point %s appears mounted but is not accessible (err: %v), attempting recovery",
+			targetPath, readErr,
+		)
 		if err := ns.forceCleanupMount(targetPath); err != nil {
 			klog.Errorf("Failed to unmount corrupted mount point %s: %v", targetPath, err)
 			return status.Errorf(codes.Internal, "corrupted mount could not be cleaned up: %v", err)
@@ -787,7 +795,7 @@ func extractVolumeMountOptions(mountOptions []string) (map[string]string, error)
 		} else {
 			rcloneKey := normalizeRcloneFlag(option)
 			// Default a boolean value
-			volumeMountOptions[rcloneKey] = "true"
+			volumeMountOptions[rcloneKey] = trueValue
 		}
 	}
 
@@ -984,7 +992,9 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
-func (ns *NodeServer) nodePublishVolumeStaged(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+func (ns *NodeServer) nodePublishVolumeStaged(
+	ctx context.Context, req *csi.NodePublishVolumeRequest,
+) (*csi.NodePublishVolumeResponse, error) {
 	if err := validatePublishVolumeRequest(req); err != nil {
 		return nil, err
 	}
@@ -1091,8 +1101,8 @@ func (ns *NodeServer) isMountHealthy(targetPath string) (bool, string) {
 	if mc := ns.getMountContext(targetPath); mc != nil {
 		if mc.mountPoint != nil && mc.mountPoint.VFS != nil {
 			stats := mc.mountPoint.VFS.Stats()
-			if errors, ok := stats["errors"]; ok && errors.(int) > 0 {
-				return false, fmt.Sprintf("VFS errors detected: %d", errors.(int))
+			if errCount, ok := stats["errors"]; ok && errCount.(int) > 0 {
+				return false, fmt.Sprintf("VFS errors detected: %d", errCount.(int))
 			}
 		}
 	}

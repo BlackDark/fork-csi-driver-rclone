@@ -165,7 +165,7 @@ func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeR
 		if volumeMountGroup != "" {
 			params[paramVolumeMountGroup] = volumeMountGroup
 			params[paramVolumeMountUser] = volumeMountGroup
-			params[paramVolumeMountAllowOther] = "true"
+			params[paramVolumeMountAllowOther] = trueValue
 			klog.V(2).Infof("Volume mount group: %s, user: %s", volumeMountGroup, params[paramVolumeMountUser])
 		}
 	}

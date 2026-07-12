@@ -42,8 +42,11 @@ func TestParseCSIMountPath(t *testing.T) {
 			wantOK:     true,
 		},
 		{
-			name:       "valid relative segments",
-			path:       filepath.Join("var", "lib", "kubelet", "pods", "uid-1", "volumes", "kubernetes.io~csi", "pvc-vol", "mount"),
+			name: "valid relative segments",
+			path: filepath.Join(
+				"var", "lib", "kubelet", "pods", "uid-1", "volumes",
+				"kubernetes.io~csi", "pvc-vol", "mount",
+			),
 			wantUID:    "uid-1",
 			wantVolume: "pvc-vol",
 			wantOK:     true,
