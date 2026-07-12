@@ -217,9 +217,28 @@ kubectl apply -f hack/e2e/workloads.yaml
 
 ---
 
-### TC-08 Staging + CSI restart (re-run after Phase D — pending)
+### TC-08 Staging + CSI restart (re-run after Phase D — FAIL)
 
-Re-run TC-08 with `hack/e2e/helm-values-staging.yaml` (`hostPID: true`). Expect PASS for both writers without workload restart.
+Re-run TC-08 with `hack/e2e/helm-values-staging.yaml` (`hostPID: true`) and Phase D container remount (`ttl.sh/csi-rclone-phase-d-hosthelper:8h`, commit `989e1e9`).
+
+**Result (2026-07-12, `informaten`):** FAIL — host publish refresh OK; container remount cannot exec helper in workload mnt ns
+
+| Check | Result | Evidence |
+|-------|--------|----------|
+| Deploy staging+hostPID | PASS | `helm upgrade ... -f helm-values.yaml -f helm-values-staging.yaml`; `hostPID: true` on CSI node |
+| Baseline tail (both writers) | PASS | `/data is a mountpoint`; `tail /data/e2e.log` before CSI delete |
+| CSI node force-delete | PASS | `kubectl delete pod -l app=csi-rclone-node --grace-period=0`; new pod Ready |
+| Workload UIDs unchanged | PASS | `e2e-writer` uid `1e85599b-...`; `e2e-writer-propagated` uid `5fd7e30e-...` unchanged |
+| Publish bind refresh | PASS | CSI logs: `Refreshed publish bind` for both publish paths |
+| Container remount | FAIL | `Installed container remount helper at .../remount-helper/rcloneplugin` then `nsenter: failed to execute /proc/1/root/var/lib/kubelet/plugins/.../rcloneplugin: No such file or directory` |
+| Post-restart tail + sentinel (`kubectl exec`) | FAIL | `Transport endpoint is not connected` on both writers |
+| Host publish sentinel (`ssh debian-01`) | FAIL | `WRITER_HOST_FAIL` / `PROP_HOST_FAIL` for sentinel files under kubelet publish paths |
+
+**Root cause:** Workload container mount namespaces on k3s cannot execute the CSI `rcloneplugin` helper (not at `/rcloneplugin`, not via `/proc/self/fd/N`, not via `/proc/<csi-pid>/root`, not via `/proc/1/root/var/lib/kubelet/...`). `move_mount(2)` on inherited `open_tree` fd requires a process inside the container mnt ns; `setns(2)` from Go subprocess returns `EINVAL`; `nsenter` can enter the ns but cannot exec the helper binary.
+
+**Commits (Phase D fixes, branch `feat/nodestagevolume-staging`):** `80d1ba5`, `8d9eb8a`, `aba7a61`, `989e1e9`, `8090605`, `6e91ed8` (latest HEAD reverts host-helper path; still blocked on helper exec in container mnt ns).
+
+**Note:** One interim run showed `kubectl exec` I/O + host sentinel OK for `e2e-writer` only, but an external deployment rollout recreated pods during the test window — not a valid TC-08 PASS.
 
 ---
 
