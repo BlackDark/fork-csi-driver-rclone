@@ -108,6 +108,8 @@ node:
     enabled: false
   staging:
     enabled: false
+  # When null, defaults to true when staging.enabled and remount.enabled are both true.
+  hostPID: null
   livenessProbe:
     healthPort: 29653
   affinity: {}

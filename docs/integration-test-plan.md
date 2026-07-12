@@ -200,7 +200,26 @@ kubectl apply -f hack/e2e/workloads.yaml
 **Notes:**
 - New CSI node logs reported `Remounting 3 persisted mount states`, `Successfully remounted volume`, and `Refreshed publish bind` for the writer publish paths.
 - Driver-side refresh repaired kubelet publish mount paths, but existing container bind mounts still referenced the old stale mount object.
-- TC-08 success criterion was not met: `e2e-writer-propagated` did not survive CSI restart without workload restart.
+- TC-08 success criterion was not met before Phase D: both writers failed after CSI restart.
+
+---
+
+### TC-09 Container remount + hostPID gate (pending)
+
+**Goal:** Validate Phase D container remount and `hostPID` requirement.
+
+**Steps:**
+1. Deploy with `node.hostPID: false` (override auto default) → CSI restart → expect ENOTCONN
+2. Upgrade to `node.hostPID: true` → CSI restart → expect I/O OK without workload restart
+3. CSI node logs: `Remounted container mount` lines; `/proc` in CSI pod >> 100 entries
+
+**Pass criteria:** hostPID gate demonstrated; recovery after step 2 for both `e2e-writer` and `e2e-writer-propagated`.
+
+---
+
+### TC-08 Staging + CSI restart (re-run after Phase D — pending)
+
+Re-run TC-08 with `hack/e2e/helm-values-staging.yaml` (`hostPID: true`). Expect PASS for both writers without workload restart.
 
 ---
 

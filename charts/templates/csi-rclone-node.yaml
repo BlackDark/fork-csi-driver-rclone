@@ -20,6 +20,12 @@ spec:
         {{- include "rclone.commonLabels" . | nindent 8 }}
     spec:
       hostNetwork: true
+      {{- $hostPID := .Values.node.hostPID }}
+      {{- if kindIs "bool" $hostPID }}
+      hostPID: {{ $hostPID }}
+      {{- else if and .Values.node.staging.enabled .Values.node.remount.enabled }}
+      hostPID: true
+      {{- end }}
       dnsPolicy: {{ .Values.node.dnsPolicy }}
       serviceAccountName: {{ include "rclone.serviceAccountName.node" . }}
       terminationGracePeriodSeconds: {{ .Values.node.terminationGracePeriodSeconds }}

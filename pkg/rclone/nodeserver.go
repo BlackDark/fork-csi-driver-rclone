@@ -1008,7 +1008,10 @@ func (ns *NodeServer) nodePublishVolumeStaged(
 	}
 	defer release()
 
-	stagingPath := ns.getStagingPathForPublish(ctx, volumeID)
+	stagingPath := ns.resolveStagingPath(ctx, volumeID, req.GetStagingTargetPath())
+	if stagingPath == "" {
+		return nil, status.Errorf(codes.FailedPrecondition, "staging path unknown for volume %s", volumeID)
+	}
 	healthy, _ := ns.stageMountHealthy(stagingPath)
 	if ns.getStagedVolume(volumeID) == nil || !healthy {
 		if !healthy {
@@ -1288,7 +1291,7 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 			return fmt.Errorf("prepare target directory: %w", err)
 		}
 		if ns.Driver != nil && ns.Driver.staging && isLikelyStagingPath(mountPath) {
-			if err := ns.rebuildStagedVolumeAfterRemount(state, mountPath); err != nil {
+			if err := ns.rebuildStagedVolumeAfterRemount(ctx, state, mountPath); err != nil {
 				return err
 			}
 			return nil
@@ -1369,7 +1372,7 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 			stagingPath: mountPath,
 			mountCtx:    mc,
 		})
-		if err := ns.refreshPublishBindsForVolume(mountPath, state.VolumeID); err != nil {
+		if err := ns.refreshPublishBindsAndRemountContainers(ctx, mountPath, state.VolumeID); err != nil {
 			return fmt.Errorf("refresh publish binds: %w", err)
 		}
 	}
