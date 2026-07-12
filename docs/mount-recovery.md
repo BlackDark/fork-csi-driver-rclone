@@ -52,6 +52,34 @@ On `NodePublishVolume`:
 2. After driver restart (no mount context), a healthy but driverless FUSE mount is force-unmounted and remounted.
 3. Corrupted mounts (`ENOTCONN` / transport errors) are force-unmounted before remount.
 
+## Staging architecture
+
+Staging mode enables the CSI `NodeStageVolume` + `NodePublishVolume` flow. The driver mounts one rclone FUSE filesystem per volume per node at kubelet's node-global staging path, then bind-mounts that staging path into each workload pod target.
+
+Enable it with:
+
+```yaml
+node:
+  staging:
+    enabled: true
+  remount:
+    enabled: true
+```
+
+In this mode, `NodeStageVolume` owns the FUSE mount and persists the staging path for boot-time remount. `NodePublishVolume` only creates a bind mount from staging to the pod path. After a CSI node pod restart, persisted remount restores the staging FUSE mount; subsequent publish calls can rebuild in-memory staging state from the healthy staging mount or restage if the mount is stale.
+
+This is the CSI-native self-heal path for stale FUSE mounts. With workload `mountPropagation: HostToContainer`, refreshed staging mounts can propagate into running containers without a workload rollout. Workloads without mount propagation may still need a pod restart; the volume recovery operator remains a fallback for those pods.
+
+### Upgrade path
+
+Staging is disabled by default for rollback safety. To enable it on an existing cluster:
+
+1. Upgrade the driver with `node.staging.enabled=true` and `node.remount.enabled=true`.
+2. Let the CSI node DaemonSet roll.
+3. Recycle workload pods once so kubelet stages existing volumes through the new stage+publish path, or let the volume recovery operator restart affected pods.
+
+New PVC mounts automatically use stage+publish after staging is enabled.
+
 ## Volume recovery operator (Phase C)
 
 The optional **volume recovery operator** is a node-local DaemonSet that complements driver self-healing (Phase A) and persisted remount (Phase B). It targets **application bind mounts** that remain stale inside workload pods after the CSI driver remounts the kubelet path.

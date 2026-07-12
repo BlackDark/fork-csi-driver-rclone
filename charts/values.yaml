@@ -106,6 +106,8 @@ node:
   terminationGracePeriodSeconds: 120
   remount:
     enabled: false
+  staging:
+    enabled: false
   livenessProbe:
     healthPort: 29653
   affinity: {}

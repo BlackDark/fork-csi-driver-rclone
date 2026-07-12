@@ -139,7 +139,11 @@ Helm values must set custom image + `node.remount.enabled=true` for Phase B test
 - New pods can read/write without manual rollout
 - Kubelet-path scanner still handles remount-disabled stale paths
 
-**Result (2026-07-12):** Design gap fixed in code — re-test on cluster to confirm
+**Result (2026-07-12):** PASS on `informaten`
+- Operator logged `CSI node pod restart detected` + `restarted pod after CSI node restart` for `e2e-writer` and `e2e-writer-propagated` (~30s after CSI pod delete, 15s scan interval)
+- Workload pod UIDs changed without manual `rollout restart`
+- Post-recovery: `tail /data/e2e.log` OK, new file write OK (`post-operator-recovery.log`)
+- No `Transport endpoint is not connected` after operator recovery
 
 ---
 

@@ -36,6 +36,7 @@ var (
 	nodeID     = flag.String("nodeid", "", "node id")
 	driverName = flag.String("drivername", rclone.DefaultDriverName, "name of the driver")
 	remount    = flag.Bool("remount", false, "remount existing volume mount points on startup")
+	staging    = flag.Bool("staging", false, "enable CSI NodeStageVolume staging path")
 )
 
 func main() {
@@ -107,6 +108,7 @@ func main() {
 		DriverName: *driverName,
 		Endpoint:   *endpoint,
 		Remount:    *remount,
+		Staging:    *staging,
 	}
 
 	driver := rclone.NewDriver(&driverOptions)

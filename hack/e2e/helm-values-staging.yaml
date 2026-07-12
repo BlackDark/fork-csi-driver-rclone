@@ -1,0 +1,5 @@
+node:
+  staging:
+    enabled: true
+  remount:
+    enabled: true

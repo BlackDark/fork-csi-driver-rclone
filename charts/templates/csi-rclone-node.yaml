@@ -122,6 +122,9 @@ spec:
             {{- if .Values.node.remount.enabled }}
             - "--remount"
             {{- end }}
+            {{- if .Values.node.staging.enabled }}
+            - "--staging"
+            {{- end }}
             {{- range $key, $value := .Values.node.extraArgs }}
             - "--{{ $key }}={{ $value }}"
             {{- end }}
