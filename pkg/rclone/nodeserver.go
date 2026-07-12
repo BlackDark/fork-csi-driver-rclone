@@ -1263,6 +1263,12 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 		if !errors.Is(err, errMountAlreadyHealthy) {
 			return fmt.Errorf("prepare target directory: %w", err)
 		}
+		if ns.Driver != nil && ns.Driver.staging && isLikelyStagingPath(mountPath) {
+			if err := ns.rebuildStagedVolumeAfterRemount(state, mountPath); err != nil {
+				return err
+			}
+			return nil
+		}
 		if ns.getMountContext(mountPath) != nil {
 			return nil
 		}
@@ -1318,17 +1324,29 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 	}
 
 	mountSuccess = true
-	ns.setMountContext(mountPath, &mountContext{
+	mc := &mountContext{
 		mountPoint: mountPoint,
 		remoteName: pvp.remoteName,
 		remotes:    remotes,
 		cancel:     cancel,
-	})
+	}
+	ns.setMountContext(mountPath, mc)
 
 	if ns.mountStateManager != nil {
 		state.Timestamp = time.Now()
 		if err := ns.mountStateManager.SaveState(ctx, state); err != nil {
 			klog.Warningf("Failed to update mount state for volume %s: %v", state.VolumeID, err)
+		}
+	}
+
+	if ns.Driver != nil && ns.Driver.staging && isLikelyStagingPath(mountPath) {
+		ns.setStagedVolume(state.VolumeID, &stagedVolume{
+			volumeID:    state.VolumeID,
+			stagingPath: mountPath,
+			mountCtx:    mc,
+		})
+		if err := ns.refreshPublishBindsForVolume(mountPath, state.VolumeID); err != nil {
+			return fmt.Errorf("refresh publish binds: %w", err)
 		}
 	}
 
