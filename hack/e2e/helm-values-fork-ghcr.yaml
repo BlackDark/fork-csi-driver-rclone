@@ -11,7 +11,7 @@ volumeRecoveryOperator:
 
 storageClass:
   create: true
-  name: rclone-fork-test
+  name: rclone-e2e
   reclaimPolicy: Delete
   volumeBindingMode: Immediate
   mountOptions:
