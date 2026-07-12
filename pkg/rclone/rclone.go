@@ -18,7 +18,9 @@ package rclone
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/rclone/rclone/fs"
@@ -45,15 +47,18 @@ type DriverOptions struct {
 	NodeID     string
 	DriverName string
 	Endpoint   string
+	Remount    bool
 }
 
 // Driver is the main driver structure
 type Driver struct {
 	name        string
+	remount     bool
 	nodeID      string
 	version     string
 	endpoint    string
 	ns          *NodeServer
+	server      NonBlockingGRPCServer
 	cscap       []*csi.ControllerServiceCapability
 	nscap       []*csi.NodeServiceCapability
 	volumeLocks *VolumeLocks
@@ -71,6 +76,7 @@ func NewDriver(options *DriverOptions) *Driver {
 		version:  driverVersion,
 		nodeID:   options.NodeID,
 		endpoint: options.Endpoint,
+		remount:  options.Remount,
 	}
 
 	d.AddControllerServiceCapabilities([]csi.ControllerServiceCapability_RPC_Type{
@@ -90,10 +96,11 @@ func NewDriver(options *DriverOptions) *Driver {
 }
 
 // NewNodeServer creates a new node server
-func NewNodeServer(d *Driver, mounter mount.Interface) *NodeServer {
+func NewNodeServer(d *Driver, mounter mount.Interface, stateManager *MountStateManager) *NodeServer {
 	return &NodeServer{
-		Driver:  d,
-		mounter: mounter,
+		Driver:            d,
+		mounter:           mounter,
+		mountStateManager: stateManager,
 	}
 }
 
@@ -105,34 +112,158 @@ func (d *Driver) Run(testMode bool) {
 	}
 	klog.V(2).Infof("\nDRIVER INFORMATION:\n-------------------\n%s\n\nStreaming logs below:", versionMeta)
 
-	// Initialize rclone core components
 	ctx := context.Background()
 
-	// Initialize global options
 	if err := fs.GlobalOptionsInit(); err != nil {
 		klog.Fatalf("Failed to initialize rclone global options: %v", err)
 	}
 
-	// Start accounting (bandwidth limiting, stats, TPS limiting)
 	accounting.Start(ctx)
 
 	klog.V(2).Info("Rclone core initialization complete")
 
 	mounter := mount.New("")
-	d.ns = NewNodeServer(d, mounter)
 
-	// Initialize metrics collector with NodeServer reference
+	var stateManager *MountStateManager
+	if d.remount {
+		stateManager, err = NewMountStateManager(d.nodeID)
+		if err != nil {
+			klog.Fatalf("Failed to initialize mount state manager: %v", err)
+		}
+	}
+
+	d.ns = NewNodeServer(d, mounter, stateManager)
+
+	if stateManager != nil {
+		if err := d.ns.RemountAllStates(ctx); err != nil {
+			klog.Warningf("Failed to remount all states on boot: %v", err)
+		}
+	}
+
 	if err := initMetricsCollector(ctx, d.nodeID, d.name, d.endpoint, d.ns); err != nil {
 		klog.Fatalf("Failed to initialize CSI metrics collector: %v", err)
 	}
 
 	s := NewNonBlockingGRPCServer()
+	d.server = s
 	s.Start(d.endpoint,
 		NewDefaultIdentityServer(d),
 		NewControllerServer(d),
 		d.ns,
 		testMode)
 	s.Wait()
+}
+
+// Shutdown performs graceful shutdown of the driver
+func (d *Driver) Shutdown(ctx context.Context) error {
+	klog.Info("Starting driver shutdown...")
+
+	if d.server != nil {
+		klog.Info("Stopping gRPC server...")
+		shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			d.server.Stop()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			klog.Info("gRPC server stopped gracefully")
+		case <-shutdownCtx.Done():
+			klog.Warning("gRPC server shutdown timeout, forcing stop")
+			d.server.ForceStop()
+		}
+	}
+
+	if d.ns != nil {
+		klog.Info("Unmounting all volumes...")
+		if err := d.ns.UnmountAll(ctx); err != nil {
+			klog.Errorf("Failed to unmount all volumes: %v", err)
+			return fmt.Errorf("failed to unmount volumes: %w", err)
+		}
+		klog.Info("All volumes unmounted successfully")
+	}
+
+	klog.Info("Driver shutdown complete")
+	return nil
+}
+
+// DumpMountInfo logs information about all active mounts
+func (d *Driver) DumpMountInfo() {
+	if d.ns == nil {
+		klog.Warning("NodeServer not initialized")
+		return
+	}
+
+	d.ns.mu.RLock()
+	defer d.ns.mu.RUnlock()
+
+	if len(d.ns.mountContext) == 0 {
+		klog.Info("No active mounts")
+		return
+	}
+
+	klog.Infof("Active mounts: %d", len(d.ns.mountContext))
+	for targetPath, mc := range d.ns.mountContext {
+		healthy := "unknown"
+		vfsStats := "unavailable"
+
+		if mc.mountPoint != nil && mc.mountPoint.VFS != nil {
+			stats := mc.mountPoint.VFS.Stats()
+			if errors, ok := stats["errors"]; ok {
+				if errCount, ok := errors.(int); ok && errCount == 0 {
+					healthy = "healthy"
+				} else {
+					healthy = fmt.Sprintf("unhealthy (errors: %d)", errors)
+				}
+			}
+
+			if diskCache, ok := stats["diskCache"].(map[string]interface{}); ok {
+				inProgress, _ := diskCache["uploadsInProgress"].(int)
+				queued, _ := diskCache["uploadsQueued"].(int)
+				vfsStats = fmt.Sprintf("uploads: %d in-progress, %d queued", inProgress, queued)
+			}
+		}
+
+		klog.Infof("  Mount: %s", targetPath)
+		klog.Infof("    Remote: %s", mc.remoteName)
+		klog.Infof("    Health: %s", healthy)
+		klog.Infof("    VFS: %s", vfsStats)
+		klog.Infof("    Loaded remotes: %d", len(mc.remotes))
+	}
+}
+
+// ForceCacheSync forces VFS cache sync on all active mounts
+func (d *Driver) ForceCacheSync(ctx context.Context) error {
+	if d.ns == nil {
+		return fmt.Errorf("NodeServer not initialized")
+	}
+
+	d.ns.mu.RLock()
+	mountContexts := make(map[string]*mountContext, len(d.ns.mountContext))
+	for targetPath, mc := range d.ns.mountContext {
+		mountContexts[targetPath] = mc
+	}
+	d.ns.mu.RUnlock()
+
+	if len(mountContexts) == 0 {
+		klog.Info("No active mounts to sync")
+		return nil
+	}
+
+	klog.Infof("Forcing cache sync on %d mounts...", len(mountContexts))
+
+	for targetPath, mc := range mountContexts {
+		klog.V(2).Infof("Syncing cache for %s", targetPath)
+		waitForVFSCacheSync(mc)
+		klog.V(2).Infof("Cache sync complete for %s", targetPath)
+	}
+
+	klog.Info("All cache syncs completed")
+	return nil
 }
 
 // AddControllerServiceCapabilities adds controller service capabilities
@@ -154,7 +285,6 @@ func (d *Driver) AddNodeServiceCapabilities(nl []csi.NodeServiceCapability_RPC_T
 }
 
 // replaceWithMap replaces template variables in str with values from the map
-// This enables dynamic path substitution using PVC/PV metadata
 func replaceWithMap(str string, m map[string]string) string {
 	for k, v := range m {
 		if k != "" {
