@@ -204,15 +204,15 @@ func remountViaNsenterMoveMount(pid int, mountPoint, stagingPath string, readOnl
 	if treeErr != nil {
 		return remountViaNsenterBind(pid, mountPoint, stagingPath, readOnly)
 	}
+	if err := clearCloseOnExec(treeFD); err != nil {
+		_ = unix.Close(treeFD)
+		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
+	}
 
 	treeFile := os.NewFile(uintptr(treeFD), "tree")
 	if treeFile == nil {
 		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
-	}
-	if err := clearCloseOnExec(int(treeFile.Fd())); err != nil {
-		_ = treeFile.Close()
-		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
 	}
 
 	script := fmt.Sprintf(
@@ -240,15 +240,15 @@ func remountViaSetnsHelper(pid int, mountPoint, stagingPath string, readOnly boo
 		klog.V(4).Infof("open_tree failed for %s, using bind fallback: %v", stagingPath, treeErr)
 		return remountViaNsenterBind(pid, mountPoint, stagingPath, readOnly)
 	}
+	if err := clearCloseOnExec(treeFD); err != nil {
+		_ = unix.Close(treeFD)
+		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
+	}
 
 	treeFile := os.NewFile(uintptr(treeFD), "tree")
 	if treeFile == nil {
 		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
-	}
-	if err := clearCloseOnExec(int(treeFile.Fd())); err != nil {
-		_ = treeFile.Close()
-		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
 	}
 
 	helper, err := os.Executable()
