@@ -200,7 +200,64 @@ kubectl apply -f hack/e2e/workloads.yaml
 **Notes:**
 - New CSI node logs reported `Remounting 3 persisted mount states`, `Successfully remounted volume`, and `Refreshed publish bind` for the writer publish paths.
 - Driver-side refresh repaired kubelet publish mount paths, but existing container bind mounts still referenced the old stale mount object.
-- TC-08 success criterion was not met: `e2e-writer-propagated` did not survive CSI restart without workload restart.
+- TC-08 success criterion was not met before Phase D: both writers failed after CSI restart.
+
+---
+
+### TC-09 Container remount + hostPID gate (pending)
+
+**Goal:** Validate Phase D container remount and `hostPID` requirement.
+
+**Steps:**
+1. Deploy with `node.hostPID: false` (override auto default) → CSI restart → expect ENOTCONN
+2. Upgrade to `node.hostPID: true` → CSI restart → expect I/O OK without workload restart
+3. CSI node logs: `Remounted container mount` lines; `/proc` in CSI pod >> 100 entries
+
+**Pass criteria:** hostPID gate demonstrated; recovery after step 2 for both `e2e-writer` and `e2e-writer-propagated`.
+
+---
+
+### TC-08 Staging + CSI restart (re-run after Phase D — FAIL)
+
+Re-run TC-08 with `hack/e2e/helm-values-staging.yaml` (`hostPID: true`) and Phase D container remount (`ttl.sh/csi-rclone-phase-d-hosthelper:8h`, commit `989e1e9`).
+
+**Result (2026-07-12, `informaten`):** FAIL — host publish refresh OK; container remount cannot exec helper in workload mnt ns
+
+| Check | Result | Evidence |
+|-------|--------|----------|
+| Deploy staging+hostPID | PASS | `helm upgrade ... -f helm-values.yaml -f helm-values-staging.yaml`; `hostPID: true` on CSI node |
+| Baseline tail (both writers) | PASS | `/data is a mountpoint`; `tail /data/e2e.log` before CSI delete |
+| CSI node force-delete | PASS | `kubectl delete pod -l app=csi-rclone-node --grace-period=0`; new pod Ready |
+| Workload UIDs unchanged | PASS | `e2e-writer` uid `1e85599b-...`; `e2e-writer-propagated` uid `5fd7e30e-...` unchanged |
+| Publish bind refresh | PASS | CSI logs: `Refreshed publish bind` for both publish paths |
+| Container remount | FAIL | `Installed container remount helper at .../remount-helper/rcloneplugin` then `nsenter: failed to execute /proc/1/root/var/lib/kubelet/plugins/.../rcloneplugin: No such file or directory` |
+| Post-restart tail + sentinel (`kubectl exec`) | FAIL | `Transport endpoint is not connected` on both writers |
+| Host publish sentinel (`ssh debian-01`) | FAIL | `WRITER_HOST_FAIL` / `PROP_HOST_FAIL` for sentinel files under kubelet publish paths |
+
+**Root cause:** Workload container mount namespaces on k3s cannot execute the CSI `rcloneplugin` helper (not at `/rcloneplugin`, not via `/proc/self/fd/N`, not via `/proc/<csi-pid>/root`, not via `/proc/1/root/var/lib/kubelet/...`). `move_mount(2)` on inherited `open_tree` fd requires a process inside the container mnt ns; `setns(2)` from Go subprocess returns `EINVAL`; `nsenter` can enter the ns but cannot exec the helper binary.
+
+**Commits (Phase D fixes, branch `feat/nodestagevolume-staging`):** `80d1ba5` … `c985d78`.
+
+**Note:** One interim run showed `kubectl exec` I/O + host sentinel OK for `e2e-writer` only, but an external deployment rollout recreated pods during the test window — not a valid TC-08 PASS.
+
+---
+
+### TC-08 Staging + CSI restart (re-run 2026-07-12 retest — FAIL)
+
+**Images:** `ttl.sh/csi-rclone-tc08-retest-20260712145952:8h` (`9b4fc0f`), `ttl.sh/csi-rclone-tc08-retest2-20260712150330:8h` (`c985d78`)
+
+| Check | Result | Evidence |
+|-------|--------|----------|
+| Deploy staging+hostPID | PASS | `hostPID: true`; 615 `/proc` entries in CSI pod |
+| Baseline container I/O | PASS | `fuse.rclone` on `/data`; live `e2e.log` / sentinels |
+| CSI node force-delete | PASS | New CSI pod Ready; workload UIDs unchanged |
+| Phase B remount + publish refresh | PASS | `Remounting 6 persisted mount states`, `Refreshed publish bind` |
+| Phase D container remount | FAIL | `clear CLOEXEC on tree fd: bad file descriptor` (both writers; persists through `c985d78`) |
+| Post-restart container I/O | FAIL | `Transport endpoint is not connected` |
+| Post-restart host publish write | PASS | `HOST-W-130252` written on kubelet publish path via SSH |
+| Pod restart recovery | PASS | `RECOVER-W-130315` / `RECOVER-P-130316` after rollout restart |
+
+**Detailed report:** [`docs/mount-recovery-findings.md`](mount-recovery-findings.md)
 
 ---
 
@@ -230,8 +287,9 @@ kubectl get namespace csi-rclone-e2e -o json | jq '.spec.finalizers=[]' | \
 | Component | Works | Limitation |
 |-----------|-------|------------|
 | Phase A publish healing | Yes | Only when kubelet calls `NodePublishVolume` |
-| Phase B boot remount | Yes | Recovers kubelet paths after CSI pod death |
-| App bind mounts | No auto-heal | Need pod restart or future `NodeStageVolume` architecture |
+| Phase B boot remount | Yes | Recovers kubelet/staging paths after CSI pod death |
+| Phase D container remount | No | `open_tree` fd / CLOEXEC inheritance blocked on cluster |
+| App bind mounts | No auto-heal | Pod restart via operator (Phase C) or manual rollout |
 | Phase C operator | Yes (CSI restart path) | Also scans kubelet-path corruption when remount disabled |
 | Bad creds | Clear I/O failure | Pod may still start |
 

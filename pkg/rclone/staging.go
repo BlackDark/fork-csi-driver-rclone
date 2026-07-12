@@ -88,6 +88,10 @@ func isLikelyStagingPath(path string) bool {
 }
 
 func (ns *NodeServer) getStagingPathForPublish(ctx context.Context, volumeID string) string {
+	return ns.resolveStagingPath(ctx, volumeID, "")
+}
+
+func (ns *NodeServer) resolveStagingPath(ctx context.Context, volumeID, kubeletStagingPath string) string {
 	if sv := ns.getStagedVolume(volumeID); sv != nil {
 		return sv.stagingPath
 	}
@@ -97,7 +101,10 @@ func (ns *NodeServer) getStagingPathForPublish(ctx context.Context, volumeID str
 		}
 		return state.TargetPath
 	}
-	return ns.getDefaultStagingPath(volumeID)
+	if kubeletStagingPath != "" {
+		return kubeletStagingPath
+	}
+	return ""
 }
 
 func (ns *NodeServer) findStagingMountState(ctx context.Context, volumeID string) *MountState {
@@ -175,14 +182,14 @@ func (ns *NodeServer) unbindPublish(targetPath string) error {
 }
 
 func (ns *NodeServer) rebuildStagedVolumeAfterRemount(
-	state *MountState, stagingPath string,
+	ctx context.Context, state *MountState, stagingPath string,
 ) error {
 	ns.setStagedVolume(state.VolumeID, &stagedVolume{
 		volumeID:    state.VolumeID,
 		stagingPath: stagingPath,
 		mountCtx:    ns.getMountContext(stagingPath),
 	})
-	if err := ns.refreshPublishBindsForVolume(stagingPath, state.VolumeID); err != nil {
+	if err := ns.refreshPublishBindsAndRemountContainers(ctx, stagingPath, state.VolumeID); err != nil {
 		return fmt.Errorf("refresh publish binds: %w", err)
 	}
 	return nil

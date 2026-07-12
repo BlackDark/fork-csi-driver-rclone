@@ -81,3 +81,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "v%s" .Chart.AppVersion -}}
 {{- end -}}
 {{- end -}}
+
+{{/* Resolve the tag to use for the volume recovery operator image */}}
+{{- define "rclone.volumeRecoveryOperatorImageTag" -}}
+{{- $tag := default "" .Values.volumeRecoveryOperator.image.tag -}}
+{{- if $tag }}
+{{- $tag -}}
+{{- else if hasPrefix "v" .Chart.AppVersion }}
+{{- .Chart.AppVersion -}}
+{{- else -}}
+{{- printf "v%s" .Chart.AppVersion -}}
+{{- end -}}
+{{- end -}}

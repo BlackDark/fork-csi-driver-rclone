@@ -49,6 +49,23 @@ feature:
 
 kubeletDir: /var/lib/kubelet
 
+volumeRecoveryOperator:
+  enabled: false
+  name: volume-recovery-operator
+  scanInterval: 60s
+  provisioner: rclone.csi.veloxpack.io
+  logLevel: 2
+  image:
+    repository: ghcr.io/veloxpack/csi-driver-rclone-volume-recovery-operator
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
 controller:
   name: csi-rclone-controller
   replicas: 1
@@ -108,6 +125,8 @@ node:
     enabled: false
   staging:
     enabled: false
+  # When null, defaults to true when staging.enabled and remount.enabled are both true.
+  hostPID: null
   livenessProbe:
     healthPort: 29653
   affinity: {}

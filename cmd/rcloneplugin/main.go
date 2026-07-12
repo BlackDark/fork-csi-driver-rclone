@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -40,6 +41,14 @@ var (
 )
 
 func main() {
+	if handled, err := rclone.RunContainerRemountHelper(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	klog.InitFlags(nil)
 	_ = flag.Set("logtostderr", "true")
 

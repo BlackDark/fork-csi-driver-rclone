@@ -4,3 +4,4 @@ node:
     enabled: true
   remount:
     enabled: true
+  hostPID: true
