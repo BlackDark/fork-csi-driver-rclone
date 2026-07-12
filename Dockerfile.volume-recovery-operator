@@ -1,0 +1,19 @@
+# Copyright 2025 Veloxpack.io
+FROM golang:1.26.2 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+COPY cmd/volume-recovery-operator/ cmd/volume-recovery-operator/
+COPY pkg/ pkg/
+COPY vendor/ vendor/
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -mod vendor -trimpath \
+    -o volume-recovery-operator \
+    cmd/volume-recovery-operator/main.go
+
+FROM registry.k8s.io/build-image/debian-base:bookworm-v1.0.7
+COPY --from=builder /workspace/volume-recovery-operator /volume-recovery-operator
+ENTRYPOINT ["/volume-recovery-operator"]
