@@ -107,10 +107,16 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 
 		corrupted, reason := r.isMountCorrupted(mount.MountPath)
 		if !corrupted {
-			klog.V(3).InfoS("skipping pod restart, mount recovered before reconcile", "pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath)
+			klog.V(3).InfoS(
+				"skipping pod restart, mount recovered before reconcile",
+				"pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath,
+			)
 			continue
 		}
-		klog.V(3).InfoS("confirmed stale CSI mount before restart", "pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath, "reason", reason)
+		klog.V(3).InfoS(
+			"confirmed stale CSI mount before restart",
+			"pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath, "reason", reason,
+		)
 
 		if err := r.restartPod(ctx, pod, now); err != nil {
 			klog.ErrorS(err, "failed to restart pod for stale mount", "pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath)
@@ -155,7 +161,9 @@ func (r *Reconciler) ReconcileWorkloadPodsAfterCSIRestart(ctx context.Context) e
 	return nil
 }
 
-func podHasProvisionerVolume(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, provisioner string) bool {
+func podHasProvisionerVolume(
+	ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, provisioner string,
+) bool {
 	for _, vol := range pod.Spec.Volumes {
 		if vol.CSI != nil && vol.CSI.Driver == provisioner {
 			return true
@@ -163,7 +171,9 @@ func podHasProvisionerVolume(ctx context.Context, client kubernetes.Interface, p
 		if vol.PersistentVolumeClaim == nil {
 			continue
 		}
-		pvc, err := client.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(ctx, vol.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+		pvc, err := client.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(
+			ctx, vol.PersistentVolumeClaim.ClaimName, metav1.GetOptions{},
+		)
 		if err != nil {
 			klog.V(4).InfoS("failed to get PVC for volume", "pvc", vol.PersistentVolumeClaim.ClaimName, "err", err)
 			continue
@@ -238,7 +248,9 @@ func IsRateLimited(pod *corev1.Pod, now time.Time, cooldown time.Duration) bool 
 	return now.Sub(last) < cooldown
 }
 
-func podUsesProvisionerVolume(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, volumeName, provisioner string) bool {
+func podUsesProvisionerVolume(
+	ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, volumeName, provisioner string,
+) bool {
 	for _, vol := range pod.Spec.Volumes {
 		if vol.Name != volumeName {
 			continue
@@ -249,7 +261,9 @@ func podUsesProvisionerVolume(ctx context.Context, client kubernetes.Interface, 
 		if vol.PersistentVolumeClaim == nil {
 			return false
 		}
-		pvc, err := client.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(ctx, vol.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+		pvc, err := client.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(
+			ctx, vol.PersistentVolumeClaim.ClaimName, metav1.GetOptions{},
+		)
 		if err != nil {
 			klog.V(4).InfoS("failed to get PVC for volume", "pvc", vol.PersistentVolumeClaim.ClaimName, "err", err)
 			return false

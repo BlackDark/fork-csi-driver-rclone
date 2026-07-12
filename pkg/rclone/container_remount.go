@@ -84,11 +84,11 @@ func (ns *NodeServer) collectPublishRemountTargets(stagingPath, volumeID string)
 			if os.IsNotExist(walkErr) {
 				return nil
 			}
-			if filepath.Base(path) != "mount" || !mount.IsCorruptedMnt(walkErr) {
+			if filepath.Base(path) != csiPublishMountDir || !mount.IsCorruptedMnt(walkErr) {
 				return nil
 			}
 		}
-		if walkErr == nil && (!d.IsDir() || filepath.Base(path) != "mount") {
+		if walkErr == nil && (!d.IsDir() || filepath.Base(path) != csiPublishMountDir) {
 			return nil
 		}
 
@@ -111,13 +111,13 @@ func (ns *NodeServer) collectPublishRemountTargets(stagingPath, volumeID string)
 		if walkErr != nil && mount.IsCorruptedMnt(walkErr) {
 			corrupted = true
 		}
-		if !sourceMatches && !(corrupted && sameVolume) {
+		if !sourceMatches && (!corrupted || !sameVolume) {
 			return nil
 		}
 
-		device, fsType, _ := getMountInfoForPath(target)
+		device, fsType := getMountInfoForPath(target)
 		if device == "" && mounted {
-			device, fsType, _ = getMountInfoForPath(target)
+			device, fsType = getMountInfoForPath(target)
 		}
 		targets = append(targets, PublishRemountTarget{
 			PublishPath: target,
@@ -150,7 +150,9 @@ func (ns *NodeServer) refreshPublishBindsAndRemountContainers(ctx context.Contex
 	return nil
 }
 
-func (ns *NodeServer) remountContainersAfterHostRecovery(_ context.Context, stagingPath string, targets []PublishRemountTarget) error {
+func (ns *NodeServer) remountContainersAfterHostRecovery(
+	_ context.Context, stagingPath string, targets []PublishRemountTarget,
+) error {
 	if !ns.containerRemountEnabled() {
 		klog.V(2).Info("Skipping container remount: requires staging, remount, and hostPID")
 		return nil

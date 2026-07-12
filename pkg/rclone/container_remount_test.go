@@ -24,7 +24,8 @@ import (
 )
 
 func TestParseMountInfoLineFuseRclone(t *testing.T) {
-	line := "8057 28 0:1294 / /var/lib/kubelet/pods/d90a7bf8/volumes/kubernetes.io~csi/pvc-abc/mount rw,nosuid,nodev,relatime shared:3039 - fuse.rclone minio:e2e-bucket rw,user_id=0,group_id=0,allow_other"
+	line := "8057 28 0:1294 / /var/lib/kubelet/pods/d90a7bf8/volumes/kubernetes.io~csi/pvc-abc/mount " +
+		"rw,nosuid,nodev,relatime shared:3039 - fuse.rclone minio:e2e-bucket rw,user_id=0,group_id=0,allow_other"
 	entry, ok := parseMountInfoLine(line)
 	require.True(t, ok)
 	assert.Equal(t, "0:1294", entry.Device)
@@ -40,7 +41,10 @@ func TestIsFuseRcloneFSType(t *testing.T) {
 func TestResolveStagingPathFailClosed(t *testing.T) {
 	ns := &NodeServer{}
 	assert.Equal(t, "", ns.resolveStagingPath(t.Context(), "vol-unknown", ""))
-	assert.Equal(t, "/kubelet/staging/globalmount", ns.resolveStagingPath(t.Context(), "vol-unknown", "/kubelet/staging/globalmount"))
+	assert.Equal(
+		t, "/kubelet/staging/globalmount",
+		ns.resolveStagingPath(t.Context(), "vol-unknown", "/kubelet/staging/globalmount"),
+	)
 }
 
 func TestCollectPublishRemountTargetsCapturesDevice(t *testing.T) {

@@ -32,13 +32,14 @@ import (
 
 var kubeletPodsDir = "/var/lib/kubelet/pods"
 
+const csiPublishMountDir = "mount"
+
 // stagedVolume tracks a FUSE mount at the node-global staging path for a volume.
 type stagedVolume struct {
 	volumeID    string
 	stagingPath string
 	mountCtx    *mountContext
 	readOnly    bool
-	publishRefs int
 }
 
 // getStagedVolume retrieves the staged volume cache entry for volumeID.
@@ -126,7 +127,9 @@ func (ns *NodeServer) findStagingMountState(ctx context.Context, volumeID string
 	return nil
 }
 
-func (ns *NodeServer) rebuildOrRestage(ctx context.Context, req *csi.NodePublishVolumeRequest, stagingPath string) error {
+func (ns *NodeServer) rebuildOrRestage(
+	ctx context.Context, req *csi.NodePublishVolumeRequest, stagingPath string,
+) error {
 	if healthy, _ := ns.stageMountHealthy(stagingPath); healthy {
 		return ns.rebuildStagedVolumeFromMount(ctx, req, stagingPath)
 	}
@@ -136,7 +139,9 @@ func (ns *NodeServer) rebuildOrRestage(ctx context.Context, req *csi.NodePublish
 	return ns.stageVolume(ctx, nodeStageRequestFromPublish(req, stagingPath))
 }
 
-func (ns *NodeServer) rebuildStagedVolumeFromMount(_ context.Context, req *csi.NodePublishVolumeRequest, stagingPath string) error {
+func (ns *NodeServer) rebuildStagedVolumeFromMount(
+	_ context.Context, req *csi.NodePublishVolumeRequest, stagingPath string,
+) error {
 	volumeID := req.GetVolumeId()
 	if healthy, msg := ns.stageMountHealthy(stagingPath); !healthy {
 		return status.Errorf(codes.FailedPrecondition, "staging mount %s is not healthy: %s", stagingPath, msg)
@@ -176,7 +181,9 @@ func (ns *NodeServer) unbindPublish(targetPath string) error {
 	return ns.forceCleanupMount(targetPath)
 }
 
-func (ns *NodeServer) rebuildStagedVolumeAfterRemount(ctx context.Context, state *MountState, stagingPath string) error {
+func (ns *NodeServer) rebuildStagedVolumeAfterRemount(
+	ctx context.Context, state *MountState, stagingPath string,
+) error {
 	ns.setStagedVolume(state.VolumeID, &stagedVolume{
 		volumeID:    state.VolumeID,
 		stagingPath: stagingPath,
@@ -231,7 +238,7 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 			if os.IsNotExist(walkErr) {
 				return nil
 			}
-			if filepath.Base(path) != "mount" {
+			if filepath.Base(path) != csiPublishMountDir {
 				klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
 				return nil
 			}
@@ -241,7 +248,7 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 				return nil
 			}
 		}
-		if walkErr == nil && (!d.IsDir() || filepath.Base(path) != "mount") {
+		if walkErr == nil && (!d.IsDir() || filepath.Base(path) != csiPublishMountDir) {
 			return nil
 		}
 
@@ -259,7 +266,7 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 			(sameVolume && mounted && stagingMounted && mp.source == stagingMount.source)
 		corrupted, _ := IsMountPathCorrupted(target)
 		corrupted = corrupted || corruptedByWalk
-		if !sourceMatches && !(corrupted && sameVolume) {
+		if !sourceMatches && (!corrupted || !sameVolume) {
 			return nil
 		}
 
@@ -284,7 +291,8 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 
 func stagingVolumeNameSet(stagingPath, volumeID string) map[string]struct{} {
 	names := map[string]struct{}{}
-	for _, name := range []string{extractVolumeID(stagingPath), volumeID, strings.TrimPrefix(volumeID[strings.LastIndex(volumeID, "#")+1:], "#")} {
+	volSuffix := strings.TrimPrefix(volumeID[strings.LastIndex(volumeID, "#")+1:], "#")
+	for _, name := range []string{extractVolumeID(stagingPath), volumeID, volSuffix} {
 		if name != "" && name != unknownValue {
 			names[name] = struct{}{}
 		}
@@ -316,7 +324,7 @@ func parseCSIPublishMountPath(path string) (podUID, volumeName string, ok bool) 
 	if podsIdx < 0 || csiIdx < 0 || podsIdx+1 >= len(parts) || csiIdx+1 >= len(parts) {
 		return "", "", false
 	}
-	if parts[len(parts)-1] != "mount" {
+	if parts[len(parts)-1] != csiPublishMountDir {
 		return "", "", false
 	}
 	podUID = parts[podsIdx+1]
