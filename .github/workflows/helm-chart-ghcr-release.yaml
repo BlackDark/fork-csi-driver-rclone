@@ -72,14 +72,17 @@ jobs:
           else
             VERSION=$(yq eval '.version' "${CHART_PATH}/Chart.yaml")
           fi
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lc=${OWNER_LC}" >> "${GITHUB_OUTPUT}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "app_version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
       - name: Patch chart for fork registry
         run: |
           set -euo pipefail
-          DRIVER_IMAGE="ghcr.io/${{ github.repository }}"
-          OPERATOR_IMAGE="ghcr.io/${{ github.repository }}-volume-recovery-operator"
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          DRIVER_IMAGE="ghcr.io/${REPO_LC}"
+          OPERATOR_IMAGE="ghcr.io/${REPO_LC}-volume-recovery-operator"
           yq -i ".version = \"${{ steps.version.outputs.version }}\"" "${CHART_PATH}/Chart.yaml"
           yq -i ".appVersion = \"${{ steps.version.outputs.app_version }}\"" "${CHART_PATH}/Chart.yaml"
           yq -i ".image.rclone.repository = \"${DRIVER_IMAGE}\"" "${CHART_PATH}/values.yaml"
@@ -92,7 +95,7 @@ jobs:
         uses: appany/helm-oci-chart-releaser@v0.5.0
         with:
           name: csi-driver-rclone
-          repository: ${{ github.repository_owner }}/charts
+          repository: ${{ steps.version.outputs.owner_lc }}/charts
           tag: ${{ steps.version.outputs.version }}
           app_version: ${{ steps.version.outputs.app_version }}
           path: ${{ env.CHART_PATH }}
@@ -106,11 +109,11 @@ jobs:
           cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
           ## Helm chart published
 
-          **Chart:** \`oci://ghcr.io/${{ github.repository_owner }}/charts/csi-driver-rclone\`
+          **Chart:** \`oci://ghcr.io/${{ steps.version.outputs.owner_lc }}/charts/csi-driver-rclone\`
           **Version:** \`${{ steps.version.outputs.version }}\`
 
           \`\`\`bash
-          helm upgrade --install csi-rclone oci://ghcr.io/${{ github.repository_owner }}/charts/csi-driver-rclone \\
+          helm upgrade --install csi-rclone oci://ghcr.io/${{ steps.version.outputs.owner_lc }}/charts/csi-driver-rclone \\
             --version ${{ steps.version.outputs.version }} \\
             --namespace veloxpack --create-namespace \\
             -f hack/e2e/helm-values-fork-ghcr.yaml
