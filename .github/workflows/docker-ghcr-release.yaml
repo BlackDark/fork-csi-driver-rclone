@@ -1,17 +1,22 @@
 name: Build and push Docker image to GHCR
 
-# Trigger on tags and releases for production builds
 on:
   push:
     tags:
       - 'v*'
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image tag without v prefix (e.g. 0.3.0-rc1)'
+        required: true
   pull_request:
     branches:
       - main
     paths:
       - 'Dockerfile'
+      - 'Dockerfile.volume-recovery-operator'
       - 'cmd/**'
       - 'pkg/**'
       - 'internal/**'
@@ -19,17 +24,34 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  DRIVER_IMAGE: ${{ github.repository }}
+  OPERATOR_IMAGE: ${{ github.repository }}-volume-recovery-operator
 
 jobs:
-  build-and-push-image:
+  resolve-version:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      ref_name: ${{ steps.version.outputs.ref_name }}
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "ref_name=v${VERSION}" >> "${GITHUB_OUTPUT}"
+
+  build-and-push-driver:
+    runs-on: ubuntu-latest
+    needs: [resolve-version]
+    if: always() && (needs.resolve-version.result == 'success' || needs.resolve-version.result == 'skipped')
     permissions:
       contents: read
       packages: write
       attestations: write
       id-token: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -50,17 +72,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve driver version
+        id: driver_version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "ref_name=${{ needs.resolve-version.outputs.ref_name }}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "ref_name=${{ github.ref_name }}" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.DRIVER_IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.driver_version.outputs.ref_name }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
           labels: |
             org.opencontainers.image.title=CSI Driver Rclone
             org.opencontainers.image.description=CSI Rclone Driver for Kubernetes - Mount cloud storage as persistent volumes
-            org.opencontainers.image.vendor=VeloxPack
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
 
-      - name: Build and push Docker image
+      - name: Build and push driver image
         id: push
         uses: docker/build-push-action@v6
         with:
@@ -70,21 +104,21 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=driver
+          cache-to: type=gha,mode=max,scope=driver
           provenance: false
           sbom: false
           build-args: |
             GIT_COMMIT=${{ github.sha }}
             BUILD_DATE=${{ github.event.repository.updated_at }}
-            DRIVER_VERSION=${{ github.ref_name }}
+            DRIVER_VERSION=${{ steps.driver_version.outputs.ref_name }}
 
       - name: Generate artifact attestation
         if: github.event_name != 'pull_request' && github.actor != 'nektos/act'
         continue-on-error: true
         uses: actions/attest-build-provenance@v3
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-name: ${{ env.REGISTRY }}/${{ env.DRIVER_IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
@@ -92,53 +126,86 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
-          ## 🐳 Docker Image Published to GHCR
+          ## Driver image published
 
-          **Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`
-          **Tags:**
-          \`\`\`
-          ${{ steps.meta.outputs.tags }}
-          \`\`\`
-          **Digest:** \`${{ steps.push.outputs.digest }}\`
-
-          ### Pull Image
+          **Image:** \`${{ env.REGISTRY }}/${{ env.DRIVER_IMAGE }}\`
+          **Tags:** \`${{ steps.driver_version.outputs.ref_name }}\`, \`latest\` (default branch only)
 
           \`\`\`bash
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          \`\`\`
-
-          ### Specific Version
-
-          \`\`\`bash
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-          \`\`\`
-
-          ### Verify Attestation
-
-          \`\`\`bash
-          gh attestation verify \\
-            oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \\
-            --owner ${{ github.repository_owner }}
-          \`\`\`
-
-          ### Make Package Public
-
-          📝 **Important:** By default, packages are private. To make this image publicly accessible:
-
-          1. Go to: https://github.com/${{ github.repository_owner }}?tab=packages
-          2. Click on the \`csi-driver-rclone\` package
-          3. Click "Package settings"
-          4. Scroll to "Danger Zone"
-          5. Click "Change visibility" → Select "Public"
-
-          ### Kubernetes Deployment
-
-          Update your values.yaml:
-          \`\`\`yaml
-          image:
-            rclone:
-              repository: ghcr.io/${{ github.repository }}
-              tag: ${{ github.ref_name }}
+          helm upgrade --install csi-rclone oci://ghcr.io/${{ github.repository_owner }}/charts/csi-driver-rclone \\
+            --version ${{ needs.resolve-version.outputs.version || steps.driver_version.outputs.ref_name }} \\
+            --namespace veloxpack --create-namespace \\
+            --set image.rclone.repository=ghcr.io/${{ env.DRIVER_IMAGE }} \\
+            --set image.rclone.tag=${{ steps.driver_version.outputs.ref_name }}
           \`\`\`
           EOF
 
+  build-and-push-operator:
+    runs-on: ubuntu-latest
+    needs: [resolve-version]
+    if: always() && (needs.resolve-version.result == 'success' || needs.resolve-version.result == 'skipped') && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve operator version
+        id: operator_version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "ref_name=${{ needs.resolve-version.outputs.ref_name }}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "ref_name=${{ github.ref_name }}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Extract metadata (tags, labels) for operator
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OPERATOR_IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.operator_version.outputs.ref_name }}
+            type=raw,value=latest,enable={{ is_default_branch }}
+
+      - name: Build and push operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.volume-recovery-operator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=operator
+          cache-to: type=gha,mode=max,scope=operator
+          provenance: false
+          sbom: false
+
+      - name: Summary
+        run: |
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
+          ## Volume recovery operator image published
+
+          **Image:** \`${{ env.REGISTRY }}/${{ env.OPERATOR_IMAGE }}:${{ steps.operator_version.outputs.ref_name }}\`
+
+          \`\`\`bash
+          --set volumeRecoveryOperator.enabled=true \\
+          --set volumeRecoveryOperator.image.repository=ghcr.io/${{ env.OPERATOR_IMAGE }} \\
+          --set volumeRecoveryOperator.image.tag=${{ steps.operator_version.outputs.ref_name }}
+          \`\`\`
+          EOF
