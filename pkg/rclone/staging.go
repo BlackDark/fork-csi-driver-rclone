@@ -104,10 +104,10 @@ func (ns *NodeServer) findStagingMountState(ctx context.Context, volumeID string
 }
 
 func (ns *NodeServer) rebuildOrRestage(ctx context.Context, req *csi.NodePublishVolumeRequest, stagingPath string) error {
-	if healthy, _ := IsMountPathHealthy(stagingPath, ns.mounter); healthy {
+	if healthy, _ := ns.stageMountHealthy(stagingPath); healthy {
 		return ns.rebuildStagedVolumeFromMount(ctx, req, stagingPath)
 	}
-	if err := ns.forceCleanupMount(stagingPath); err != nil {
+	if err := ns.cleanupUnhealthyStagingMount(stagingPath); err != nil {
 		return status.Errorf(codes.Internal, "failed to cleanup staging mount before restage: %v", err)
 	}
 	return ns.stageVolume(ctx, nodeStageRequestFromPublish(req, stagingPath))
@@ -115,7 +115,7 @@ func (ns *NodeServer) rebuildOrRestage(ctx context.Context, req *csi.NodePublish
 
 func (ns *NodeServer) rebuildStagedVolumeFromMount(_ context.Context, req *csi.NodePublishVolumeRequest, stagingPath string) error {
 	volumeID := req.GetVolumeId()
-	if healthy, msg := IsMountPathHealthy(stagingPath, ns.mounter); !healthy {
+	if healthy, msg := ns.stageMountHealthy(stagingPath); !healthy {
 		return status.Errorf(codes.FailedPrecondition, "staging mount %s is not healthy: %s", stagingPath, msg)
 	}
 	ns.setStagedVolume(volumeID, &stagedVolume{
