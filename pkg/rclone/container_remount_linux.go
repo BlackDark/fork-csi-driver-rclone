@@ -21,13 +21,11 @@ package rclone
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
@@ -226,72 +224,6 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 		return fmt.Errorf("container remount helper pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
 	}
 	_ = treeFile.Close()
-	return nil
-}
-
-const hostRemountHelperDir = "/var/lib/kubelet/plugins/kubernetes.io/csi/rclone.csi.veloxpack.io/remount-helper"
-
-var (
-	hostRemountHelperOnce sync.Once
-	hostRemountHelperPath string
-	hostRemountHelperErr  error
-)
-
-func containerRemountHelperExecutable() (string, error) {
-	hostPath, err := ensureHostRemountHelper()
-	if err != nil {
-		return "", err
-	}
-	// Reach host-root binary from workload mnt ns via init proc (requires hostPID).
-	return "/proc/1/root" + hostPath, nil
-}
-
-func ensureHostRemountHelper() (string, error) {
-	hostRemountHelperOnce.Do(func() {
-		hostPath := filepath.Join(hostRemountHelperDir, "rcloneplugin")
-		exe, err := os.Executable()
-		if err != nil {
-			hostRemountHelperErr = fmt.Errorf("resolve executable: %w", err)
-			return
-		}
-		if err := os.MkdirAll(hostRemountHelperDir, 0o755); err != nil {
-			hostRemountHelperErr = fmt.Errorf("mkdir %s: %w", hostRemountHelperDir, err)
-			return
-		}
-		if _, err := os.Stat(hostPath); err != nil {
-			if !os.IsNotExist(err) {
-				hostRemountHelperErr = fmt.Errorf("stat %s: %w", hostPath, err)
-				return
-			}
-			if err := installHostRemountHelper(exe, hostPath); err != nil {
-				hostRemountHelperErr = err
-				return
-			}
-		}
-		hostRemountHelperPath = hostPath
-	})
-	return hostRemountHelperPath, hostRemountHelperErr
-}
-
-func installHostRemountHelper(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", src, err)
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o555)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dst, err)
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("copy helper to %s: %w", dst, err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", dst, err)
-	}
-	klog.Infof("Installed container remount helper at %s", dst)
 	return nil
 }
 
