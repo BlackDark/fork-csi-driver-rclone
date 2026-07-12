@@ -9,7 +9,7 @@ echo "==> uninstall helm release (no wait)"
 helm uninstall "$RELEASE" -n "$NS" 2>/dev/null || true
 
 echo "==> delete cluster-scoped e2e resources"
-kubectl delete clusterrole,clusterrolebinding volume-recovery-operator-e2e \
+kubectl delete clusterrole,clusterrolebinding volume-recovery-operator-e2e volume-recovery-operator \
   --ignore-not-found --wait=false 2>/dev/null || true
 kubectl delete sc rclone-e2e-bad rclone-e2e --ignore-not-found --wait=false 2>/dev/null || true
 
