@@ -28,52 +28,73 @@ import (
 )
 
 const containerRemountHelperCmd = "__container-remount"
+const containerMoveMountHelperCmd = "__container-move-mount"
 
 // moveMountFFromTree is MOVE_MOUNT_F_FROM_TREE from linux/mount.h (not in older x/sys/unix).
 const moveMountFFromTree = 0x8
 
 const inheritedTreeFD = 3
 
-// RunContainerRemountHelper runs the single-threaded setns+move_mount helper when invoked
-// as: __container-remount <pid> <mountPoint> <readOnly:true|false>
+// RunContainerRemountHelper runs container mount repair helpers when invoked as:
+//   __container-remount <pid> <mountPoint> <readOnly:true|false>  (setns + move_mount; legacy)
+//   __container-move-mount <mountPoint> <readOnly:true|false>     (move_mount only; under nsenter)
 func RunContainerRemountHelper(args []string) (handled bool, err error) {
-	if len(args) == 0 || args[0] != containerRemountHelperCmd {
+	if len(args) == 0 {
 		return false, nil
 	}
-	if len(args) != 4 {
-		return true, fmt.Errorf("%s: expected 3 args, got %d", containerRemountHelperCmd, len(args)-1)
+	switch args[0] {
+	case containerRemountHelperCmd:
+		return true, runContainerRemountSetns(args[1:])
+	case containerMoveMountHelperCmd:
+		return true, runContainerMoveMount(args[1:])
+	default:
+		return false, nil
 	}
-	pid, err := strconv.Atoi(args[1])
+}
+
+func runContainerMoveMount(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("%s: expected 2 args, got %d", containerMoveMountHelperCmd, len(args))
+	}
+	return moveTreeFDIntoMountPoint(args[0], strings.EqualFold(args[1], "true"))
+}
+
+func runContainerRemountSetns(args []string) error {
+	if len(args) != 3 {
+		return fmt.Errorf("%s: expected 3 args, got %d", containerRemountHelperCmd, len(args))
+	}
+	pid, err := strconv.Atoi(args[0])
 	if err != nil || pid <= 1 {
-		return true, fmt.Errorf("%s: invalid pid %q", containerRemountHelperCmd, args[1])
+		return fmt.Errorf("%s: invalid pid %q", containerRemountHelperCmd, args[0])
 	}
-	mountPoint := args[2]
-	readOnly := strings.EqualFold(args[3], "true")
 
 	nsPath := fmt.Sprintf("/proc/%d/ns/mnt", pid)
 	nsFD, err := unix.Open(nsPath, unix.O_RDONLY, 0)
 	if err != nil {
-		return true, fmt.Errorf("open %s: %w", nsPath, err)
+		return fmt.Errorf("open %s: %w", nsPath, err)
 	}
 	defer unix.Close(nsFD)
 
 	if err := unix.Setns(nsFD, unix.CLONE_NEWNS); err != nil {
-		return true, fmt.Errorf("setns pid %d: %w", pid, err)
+		return fmt.Errorf("setns pid %d: %w", pid, err)
 	}
+	return moveTreeFDIntoMountPoint(args[1], strings.EqualFold(args[2], "true"))
+}
 
+func moveTreeFDIntoMountPoint(mountPoint string, readOnly bool) error {
 	_ = unix.Unmount(mountPoint, unix.MNT_DETACH)
 	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
-		return true, fmt.Errorf("mkdir %s: %w", mountPoint, err)
+		return fmt.Errorf("mkdir %s: %w", mountPoint, err)
 	}
 
 	flags := moveMountFFromTree | unix.MOVE_MOUNT_T_EMPTY_PATH
 	if err := unix.MoveMount(inheritedTreeFD, "", unix.AT_FDCWD, mountPoint, flags); err != nil {
-		return true, fmt.Errorf("move_mount pid %d mount %s: %w", pid, mountPoint, err)
+		return fmt.Errorf("move_mount mount %s: %w", mountPoint, err)
 	}
 	if readOnly {
 		if err := unix.Mount("", mountPoint, "", unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
-			return true, fmt.Errorf("remount ro %s: %w", mountPoint, err)
+			return fmt.Errorf("remount ro %s: %w", mountPoint, err)
 		}
 	}
-	return true, nil
+	return nil
 }
