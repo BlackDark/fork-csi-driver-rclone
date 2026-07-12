@@ -68,10 +68,14 @@ func (ns *NodeServer) deleteStagedVolume(volumeID string) {
 	delete(ns.stagedVolumes, volumeID)
 }
 
-func getDefaultStagingPath(volumeID string) string {
+func (ns *NodeServer) getDefaultStagingPath(volumeID string) string {
+	driverName := DefaultDriverName
+	if ns.Driver != nil && ns.Driver.name != "" {
+		driverName = ns.Driver.name
+	}
 	return filepath.Join(
 		"/var/lib/kubelet/plugins/kubernetes.io/csi",
-		DefaultDriverName,
+		driverName,
 		"pv",
 		volumeID,
 		"globalmount",
@@ -92,7 +96,7 @@ func (ns *NodeServer) getStagingPathForPublish(ctx context.Context, volumeID str
 		}
 		return state.TargetPath
 	}
-	return getDefaultStagingPath(volumeID)
+	return ns.getDefaultStagingPath(volumeID)
 }
 
 func (ns *NodeServer) findStagingMountState(ctx context.Context, volumeID string) *MountState {

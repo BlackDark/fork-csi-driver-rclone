@@ -19,6 +19,7 @@ package rclone
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -321,4 +322,39 @@ func TestAcquireVolumeLockExhaustedRetries(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, codes.Aborted, status.Code(err))
 	assert.GreaterOrEqual(t, elapsed, time.Duration(volumeLockMaxRetries-1)*volumeLockRetryDelay)
+}
+
+func TestLegacyPublishUnpublishShareLockKey(t *testing.T) {
+	ns, err := getTestNodeServer()
+	assert.NoError(t, err)
+	assert.False(t, ns.Driver.staging)
+
+	targetPath := filepath.Join(t.TempDir(), "publish-target")
+	lockKey := ns.publishVolumeLockKey(testVolumeID, targetPath)
+	assert.Equal(t, fmt.Sprintf("%s-%s", testVolumeID, targetPath), lockKey)
+
+	ns.Driver.volumeLocks.TryAcquire(lockKey)
+
+	done := make(chan error, 1)
+	go func() {
+		_, unpublishErr := ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+			VolumeId:   testVolumeID,
+			TargetPath: targetPath,
+		})
+		done <- unpublishErr
+	}()
+
+	select {
+	case unpublishErr := <-done:
+		t.Fatalf("NodeUnpublishVolume returned before publish lock was released: %v", unpublishErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	ns.Driver.volumeLocks.Release(lockKey)
+	select {
+	case unpublishErr := <-done:
+		assert.NoError(t, unpublishErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("NodeUnpublishVolume did not acquire publish lock after release")
+	}
 }

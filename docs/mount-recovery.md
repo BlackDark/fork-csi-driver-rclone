@@ -68,7 +68,9 @@ node:
 
 In this mode, `NodeStageVolume` owns the FUSE mount and persists the staging path for boot-time remount. `NodePublishVolume` only creates a bind mount from staging to the pod path. After a CSI node pod restart, persisted remount restores the staging FUSE mount; subsequent publish calls can rebuild in-memory staging state from the healthy staging mount or restage if the mount is stale.
 
-This is the CSI-native self-heal path for stale FUSE mounts. With workload `mountPropagation: HostToContainer`, refreshed staging mounts can propagate into running containers without a workload rollout. Workloads without mount propagation may still need a pod restart; the volume recovery operator remains a fallback for those pods.
+Staging improves the CSI stage/publish split and kubelet-path recovery, but it does **not** yet eliminate the need for the volume recovery operator or a workload pod restart after a CSI node pod restart (integration TC-08 currently fails). Running application containers can still hold stale bind mounts or dead FUSE file descriptors until the pod is recreated.
+
+With workload `mountPropagation: HostToContainer`, refreshed kubelet mounts may propagate into running containers in some cases, but that is not sufficient for zero-downtime recovery today. Workloads without mount propagation still need a pod restart; the volume recovery operator remains required for automated recovery after CSI restarts.
 
 ### Upgrade path
 
