@@ -1,0 +1,103 @@
+/*
+Copyright 2025 Veloxpack.io
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package main
+
+import (
+	"context"
+	"flag"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/veloxpack/csi-driver-rclone/pkg/operator"
+	"github.com/veloxpack/csi-driver-rclone/pkg/rclone"
+	mount "k8s.io/mount-utils"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
+)
+
+var (
+	kubeletDir    = flag.String("kubelet-dir", "/var/lib/kubelet", "Kubelet state directory")
+	provisioner   = flag.String("provisioner", rclone.DefaultDriverName, "CSI driver name to recover")
+	scanInterval  = flag.Duration("scan-interval", 60*time.Second, "Interval between stale mount scans")
+	nodeName      = flag.String("node-name", "", "Kubernetes node name (defaults to NODE_NAME env)")
+)
+
+func main() {
+	klog.InitFlags(nil)
+	_ = flag.Set("logtostderr", "true")
+	flag.Parse()
+
+	if *nodeName == "" {
+		*nodeName = os.Getenv("NODE_NAME")
+	}
+	if *nodeName == "" {
+		klog.Fatal("node name is required: set --node-name or NODE_NAME")
+	}
+
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		klog.Fatalf("failed to load in-cluster config: %v", err)
+	}
+
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		klog.Fatalf("failed to create kubernetes client: %v", err)
+	}
+
+	mounter := mount.New("" /* mounterPath */)
+	reconciler := operator.NewReconciler(client, *nodeName, *provisioner)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	klog.InfoS("starting volume recovery operator",
+		"node", *nodeName,
+		"kubeletDir", *kubeletDir,
+		"provisioner", *provisioner,
+		"scanInterval", *scanInterval)
+
+	ticker := time.NewTicker(*scanInterval)
+	defer ticker.Stop()
+
+	runScan := func() {
+		stale, err := operator.ScanStaleMounts(*kubeletDir, mounter)
+		if err != nil {
+			klog.ErrorS(err, "stale mount scan failed")
+			return
+		}
+		if len(stale) > 0 {
+			klog.InfoS("stale mounts detected", "count", len(stale))
+		}
+		if err := reconciler.ReconcileStaleMounts(ctx, stale); err != nil {
+			klog.ErrorS(err, "stale mount reconciliation failed")
+		}
+	}
+
+	runScan()
+	for {
+		select {
+		case <-ctx.Done():
+			klog.Info("volume recovery operator shutting down")
+			return
+		case <-ticker.C:
+			runScan()
+		}
+	}
+}
