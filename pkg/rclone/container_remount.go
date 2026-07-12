@@ -139,7 +139,10 @@ func (ns *NodeServer) refreshPublishBindsAndRemountContainers(ctx context.Contex
 	if err := ns.refreshPublishBindsForVolume(stagingPath, volumeID); err != nil {
 		return err
 	}
-	return ns.remountContainersAfterHostRecovery(ctx, stagingPath, targets)
+	if err := ns.remountContainersAfterHostRecovery(ctx, stagingPath, targets); err != nil {
+		klog.Warningf("Container remount after host recovery: %v", err)
+	}
+	return nil
 }
 
 func (ns *NodeServer) remountContainersAfterHostRecovery(_ context.Context, stagingPath string, targets []PublishRemountTarget) error {

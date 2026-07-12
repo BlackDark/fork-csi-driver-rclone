@@ -19,8 +19,10 @@ limitations under the License.
 package rclone
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -94,6 +96,18 @@ func findContainerPIDsForPod(podUID string) ([]int, error) {
 		if _, ok := seen[pid]; ok {
 			continue
 		}
+		if entries, err := readMountInfo(pid); err == nil {
+			hasFuse := false
+			for _, e := range entries {
+				if isFuseRcloneFSType(e.FSType) {
+					hasFuse = true
+					break
+				}
+			}
+			if !hasFuse {
+				continue
+			}
+		}
 		seen[pid] = struct{}{}
 		pids = append(pids, pid)
 	}
@@ -157,77 +171,62 @@ func remountStaleFuseInContainers(stagingPath string, target PublishRemountTarge
 }
 
 func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) error {
-	selfMnt, err := os.Open("/proc/self/ns/mnt")
-	if err != nil {
-		return fmt.Errorf("open self mount ns: %w", err)
-	}
-	defer selfMnt.Close()
-
-	targetMnt, err := os.Open(fmt.Sprintf("/proc/%d/ns/mnt", pid))
-	if err != nil {
-		return fmt.Errorf("open target mount ns for pid %d: %w", pid, err)
-	}
-	defer targetMnt.Close()
-
 	treeFD, treeErr := unix.OpenTree(unix.AT_FDCWD, stagingPath, unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC)
 	if treeErr != nil {
 		klog.V(4).Infof("open_tree failed for %s, using bind fallback: %v", stagingPath, treeErr)
-		return remountViaSetnsBind(selfMnt, targetMnt, pid, mountPoint, stagingPath, readOnly)
+		return remountViaNsenterBind(pid, mountPoint, stagingPath, readOnly)
 	}
 	defer unix.Close(treeFD)
 
-	if err := unix.Setns(int(targetMnt.Fd()), unix.CLONE_NEWNS); err != nil {
-		return fmt.Errorf("setns into pid %d: %w", pid, err)
+	treeFile := os.NewFile(uintptr(treeFD), "tree")
+	if treeFile == nil {
+		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
-	defer func() {
-		if err := unix.Setns(int(selfMnt.Fd()), unix.CLONE_NEWNS); err != nil {
-			klog.Errorf("failed to restore mount namespace: %v", err)
-		}
-	}()
+	defer treeFile.Close()
 
-	_ = unix.Unmount(mountPoint, unix.MNT_DETACH)
-	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
-		return fmt.Errorf("recreate mount point %s: %w", mountPoint, err)
-	}
-	if err := unix.MoveMount(treeFD, "", unix.AT_FDCWD, mountPoint, unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
-		return fmt.Errorf("move_mount to %s: %w", mountPoint, err)
-	}
+	script := fmt.Sprintf(
+		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --move /proc/self/fd/3 %s",
+		shellQuote(mountPoint), shellQuote(mountPoint), shellQuote(mountPoint),
+	)
 	if readOnly {
-		if err := unix.Mount(mountPoint, mountPoint, "", unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
-			return fmt.Errorf("remount readonly %s: %w", mountPoint, err)
-		}
+		script += fmt.Sprintf("; mount -o remount,ro %s", shellQuote(mountPoint))
+	}
+
+	cmd := exec.Command("nsenter", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
+	cmd.ExtraFiles = []*os.File{treeFile}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nsenter move_mount pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
 
-func remountViaSetnsBind(selfMnt, targetMnt *os.File, pid int, mountPoint, stagingPath string, readOnly bool) error {
-	stagingFD, err := os.Open(stagingPath)
+func remountViaNsenterBind(pid int, mountPoint, stagingPath string, readOnly bool) error {
+	stagingFile, err := os.Open(stagingPath)
 	if err != nil {
 		return fmt.Errorf("open staging path %s: %w", stagingPath, err)
 	}
-	defer stagingFD.Close()
+	defer stagingFile.Close()
 
-	if err := unix.Setns(int(targetMnt.Fd()), unix.CLONE_NEWNS); err != nil {
-		return fmt.Errorf("setns into pid %d: %w", pid, err)
-	}
-	defer func() {
-		if err := unix.Setns(int(selfMnt.Fd()), unix.CLONE_NEWNS); err != nil {
-			klog.Errorf("failed to restore mount namespace: %v", err)
-		}
-	}()
-
-	_ = unix.Unmount(mountPoint, unix.MNT_DETACH)
-	if err := os.MkdirAll(mountPoint, 0o755); err != nil {
-		return fmt.Errorf("recreate mount point %s: %w", mountPoint, err)
-	}
-	bindSource := fmt.Sprintf("/proc/self/fd/%d", stagingFD.Fd())
-	if err := unix.Mount(bindSource, mountPoint, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("bind mount %s: %w", mountPoint, err)
-	}
+	script := fmt.Sprintf(
+		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --bind /proc/self/fd/3 %s",
+		shellQuote(mountPoint), shellQuote(mountPoint), shellQuote(mountPoint),
+	)
 	if readOnly {
-		if err := unix.Mount(mountPoint, mountPoint, "", unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
-			return fmt.Errorf("remount readonly %s: %w", mountPoint, err)
-		}
+		script += fmt.Sprintf("; mount -o remount,ro %s", shellQuote(mountPoint))
+	}
+
+	cmd := exec.Command("nsenter", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
+	cmd.ExtraFiles = []*os.File{stagingFile}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nsenter bind pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+func shellQuote(value string) string {
+	return strconv.Quote(value)
 }
