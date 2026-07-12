@@ -46,6 +46,16 @@ func validateStageVolumeRequest(req *csi.NodeStageVolumeRequest) error {
 	return nil
 }
 
+func validateUnstageVolumeRequest(req *csi.NodeUnstageVolumeRequest) error {
+	if len(req.GetVolumeId()) == 0 {
+		return status.Error(codes.InvalidArgument, "Volume ID missing in request")
+	}
+	if len(req.GetStagingTargetPath()) == 0 {
+		return status.Error(codes.InvalidArgument, "Staging target path not provided")
+	}
+	return nil
+}
+
 // NodeStageVolume mounts the rclone filesystem at kubelet's node-global staging path.
 //
 //nolint:lll
@@ -224,6 +234,53 @@ func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeR
 
 	klog.V(2).Infof("Successfully staged volume %s at %s (remote: %s)", volumeID, stagingPath, pvp.remoteName)
 	return nil
+}
+
+// NodeUnstageVolume unmounts the rclone filesystem from kubelet's node-global staging path.
+//
+//nolint:lll
+func (ns *NodeServer) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
+	if ns.Driver == nil || !ns.Driver.staging {
+		return nil, status.Error(codes.Unimplemented, "")
+	}
+	if err := validateUnstageVolumeRequest(req); err != nil {
+		return nil, err
+	}
+
+	volumeID := req.GetVolumeId()
+	stagingPath := req.GetStagingTargetPath()
+	lockKey := fmt.Sprintf("stage-%s", volumeID)
+	release, err := ns.acquireVolumeLock(lockKey, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	mc := ns.getMountContext(stagingPath)
+	if mc == nil {
+		if sv := ns.getStagedVolume(volumeID); sv != nil {
+			if sv.stagingPath != stagingPath {
+				return nil, status.Errorf(codes.FailedPrecondition, "volume %s already staged at %s", volumeID, sv.stagingPath)
+			}
+			mc = sv.mountCtx
+		}
+	}
+
+	if err := ns.unmountVolume(mc, stagingPath); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to unmount staging target %q: %v", stagingPath, err)
+	}
+
+	ns.deleteMountContext(stagingPath)
+	ns.deleteStagedVolume(volumeID)
+
+	if ns.mountStateManager != nil {
+		if err := ns.mountStateManager.DeleteState(ctx, volumeID, stagingPath); err != nil {
+			klog.Warningf("Failed to delete staging state for volume %s: %v", volumeID, err)
+		}
+	}
+
+	klog.V(2).Infof("Successfully unstaged volume %s from %s", volumeID, stagingPath)
+	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
 func (ns *NodeServer) mountRcloneFilesystem(
