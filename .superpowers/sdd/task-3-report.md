@@ -36,3 +36,12 @@ Implemented.
 
 - CSI `NodePublishVolumeRequest` has no staging path, so cache-miss recovery depends on persisted mount state or the kubelet default path convention.
 - Read-only bind uses `Mount(..., []string{"bind", "ro"})`; some platforms may require remount-style readonly enforcement outside the fake mounter.
+
+## Follow-up Review Fixes - 2026-07-12
+
+- Replaced bare staging health probes in staged publish self-heal with `stageMountHealthy`.
+- Changed unhealthy staged publish recovery to call `cleanupUnhealthyStagingMount` before restage.
+- Aligned staging-mode `NodeUnpublishVolume` lock key with publish target lock key.
+- Added publish self-heal coverage:
+  - cache miss + healthy staging mount rebuilds staged cache and bind-publishes without rclone remount
+  - unhealthy staging mount cleans up, restages, and bind-publishes

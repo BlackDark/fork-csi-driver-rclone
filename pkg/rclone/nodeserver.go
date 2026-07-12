@@ -992,7 +992,7 @@ func (ns *NodeServer) nodePublishVolumeStaged(ctx context.Context, req *csi.Node
 	defer release()
 
 	stagingPath := ns.getStagingPathForPublish(ctx, volumeID)
-	healthy, _ := IsMountPathHealthy(stagingPath, ns.mounter)
+	healthy, _ := ns.stageMountHealthy(stagingPath)
 	if ns.getStagedVolume(volumeID) == nil || !healthy {
 		if !healthy {
 			ns.deleteStagedVolume(volumeID)
@@ -1031,7 +1031,7 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	targetPath := req.GetTargetPath()
 
 	// Acquire lock for this volume operation
-	lockKey := fmt.Sprintf("%s-%s", volumeID, targetPath)
+	lockKey := fmt.Sprintf("publish-%s-%s", volumeID, targetPath)
 	release, err := ns.acquireVolumeLock(lockKey, volumeID)
 	if err != nil {
 		return nil, err

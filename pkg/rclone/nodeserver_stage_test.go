@@ -18,7 +18,10 @@ package rclone
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/rclone/rclone/cmd/mountlib"
@@ -26,6 +29,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	mount "k8s.io/mount-utils"
 )
 
@@ -38,7 +46,8 @@ type recordedMount struct {
 
 type recordingMounter struct {
 	*mount.FakeMounter
-	mounts []recordedMount
+	mounts   []recordedMount
+	unmounts []string
 }
 
 func (rm *recordingMounter) Mount(source, target, fstype string, options []string) error {
@@ -49,6 +58,68 @@ func (rm *recordingMounter) Mount(source, target, fstype string, options []strin
 		options: append([]string(nil), options...),
 	})
 	return rm.FakeMounter.Mount(source, target, fstype, options)
+}
+
+func (rm *recordingMounter) Unmount(target string) error {
+	rm.unmounts = append(rm.unmounts, target)
+	return rm.FakeMounter.Unmount(target)
+}
+
+type inMemorySecretClient struct {
+	items map[string]*corev1.Secret
+}
+
+func (c *inMemorySecretClient) Create(_ context.Context, secret *corev1.Secret, _ metav1.CreateOptions) (*corev1.Secret, error) {
+	if c.items == nil {
+		c.items = make(map[string]*corev1.Secret)
+	}
+	copied := secret.DeepCopy()
+	if copied.Data == nil {
+		copied.Data = make(map[string][]byte, len(copied.StringData))
+	}
+	for key, value := range copied.StringData {
+		copied.Data[key] = []byte(value)
+	}
+	c.items[copied.Name] = copied
+	return copied.DeepCopy(), nil
+}
+
+func (c *inMemorySecretClient) Update(ctx context.Context, secret *corev1.Secret, opts metav1.UpdateOptions) (*corev1.Secret, error) {
+	return c.Create(ctx, secret, metav1.CreateOptions{})
+}
+
+func (c *inMemorySecretClient) Delete(_ context.Context, name string, _ metav1.DeleteOptions) error {
+	delete(c.items, name)
+	return nil
+}
+
+func (c *inMemorySecretClient) DeleteCollection(context.Context, metav1.DeleteOptions, metav1.ListOptions) error {
+	c.items = make(map[string]*corev1.Secret)
+	return nil
+}
+
+func (c *inMemorySecretClient) Get(_ context.Context, name string, _ metav1.GetOptions) (*corev1.Secret, error) {
+	return c.items[name].DeepCopy(), nil
+}
+
+func (c *inMemorySecretClient) List(context.Context, metav1.ListOptions) (*corev1.SecretList, error) {
+	list := &corev1.SecretList{}
+	for _, item := range c.items {
+		list.Items = append(list.Items, *item.DeepCopy())
+	}
+	return list, nil
+}
+
+func (c *inMemorySecretClient) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
+	return watch.NewEmptyWatch(), nil
+}
+
+func (c *inMemorySecretClient) Patch(context.Context, string, types.PatchType, []byte, metav1.PatchOptions, ...string) (*corev1.Secret, error) {
+	return nil, nil
+}
+
+func (c *inMemorySecretClient) Apply(context.Context, *applycorev1.SecretApplyConfiguration, metav1.ApplyOptions) (*corev1.Secret, error) {
+	return nil, nil
 }
 
 func newTestNodeServerWithStaging(t *testing.T) (*NodeServer, *recordingMounter) {
@@ -81,6 +152,34 @@ func testSecrets() map[string]string {
 		paramRemote:     testRemote,
 		paramConfigData: "[s3]\ntype = local\n",
 	}
+}
+
+func setTestStagingState(t *testing.T, ns *NodeServer, volumeID, stagingPath string) {
+	t.Helper()
+
+	ns.mountStateManager = &MountStateManager{
+		namespace: "default",
+		nodeID:    "test-node",
+		secrets:   &inMemorySecretClient{},
+	}
+	require.NoError(t, ns.mountStateManager.SaveState(context.Background(), &MountState{
+		VolumeID:   volumeID,
+		TargetPath: stagingPath,
+		Timestamp:  time.Now(),
+		RemoteName: testRemote,
+		MountParams: map[string]string{
+			paramRemote:     testRemote,
+			paramConfigData: "[s3]\ntype = local\n",
+		},
+	}))
+}
+
+func testStagingPath(t *testing.T) string {
+	t.Helper()
+
+	stagingPath := filepath.Join(t.TempDir(), "globalmount")
+	require.NoError(t, os.MkdirAll(stagingPath, 0755))
+	return stagingPath
 }
 
 func TestNodeStageVolumeValidation(t *testing.T) {
@@ -227,4 +326,77 @@ func TestNodePublishVolumeBindFromStaging(t *testing.T) {
 		fstype:  "",
 		options: []string{"bind"},
 	}, fm.mounts[1])
+}
+
+func TestNodePublishVolumeRebuildsCacheForHealthyStagingMount(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	stagingPath := testStagingPath(t)
+	targetPath := t.TempDir()
+	setTestStagingState(t, ns, "vol-publish-rebuild", stagingPath)
+	require.NoError(t, fm.Mount("test", stagingPath, "", nil))
+
+	mountCalled := false
+	ns.mountFilesystem = func(_ string, _ string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+		mountCalled = true
+		return nil, nil, nil, nil
+	}
+
+	_, err := ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:         "vol-publish-rebuild",
+		TargetPath:       targetPath,
+		VolumeCapability: testMountCapability(),
+		Secrets:          testSecrets(),
+	})
+	require.NoError(t, err)
+
+	assert.False(t, mountCalled)
+	assert.NotNil(t, ns.getStagedVolume("vol-publish-rebuild"))
+	require.Len(t, fm.mounts, 2)
+	assert.Equal(t, recordedMount{
+		source:  stagingPath,
+		target:  targetPath,
+		fstype:  "",
+		options: []string{"bind"},
+	}, fm.mounts[1])
+}
+
+func TestNodePublishVolumeRestagesUnhealthyStagingMount(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	stagingPath := testStagingPath(t)
+	targetPath := t.TempDir()
+	setTestStagingState(t, ns, "vol-publish-restage", stagingPath)
+	require.NoError(t, fm.Mount("old", stagingPath, "", nil))
+	ns.setMountContext(stagingPath, &mountContext{remoteName: "old"})
+
+	stageVolumeHealthCheck = func(_ *NodeServer, path string) (bool, string) {
+		if path == stagingPath && ns.getStagedVolume("vol-publish-restage") == nil {
+			return false, "VFS errors detected: 3"
+		}
+		return true, ""
+	}
+	t.Cleanup(func() { stageVolumeHealthCheck = nil })
+
+	_, err := ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:         "vol-publish-restage",
+		TargetPath:       targetPath,
+		VolumeCapability: testMountCapability(),
+		Secrets:          testSecrets(),
+	})
+	require.NoError(t, err)
+
+	assert.NotNil(t, ns.getStagedVolume("vol-publish-restage"))
+	assert.Contains(t, fm.unmounts, stagingPath)
+	require.Len(t, fm.mounts, 3)
+	assert.Equal(t, recordedMount{
+		source:  "test",
+		target:  stagingPath,
+		fstype:  "",
+		options: []string(nil),
+	}, fm.mounts[1])
+	assert.Equal(t, recordedMount{
+		source:  stagingPath,
+		target:  targetPath,
+		fstype:  "",
+		options: []string{"bind"},
+	}, fm.mounts[2])
 }
