@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestMountStateValidate(t *testing.T) {
@@ -67,4 +68,37 @@ func TestMountStateManagerMakeSecretName(t *testing.T) {
 
 	otherName := sm.makeSecretName("other-volume-id")
 	assert.NotEqual(t, name1, otherName)
+}
+
+func TestMountStateSecretIncludesStagingPath(t *testing.T) {
+	sm := &MountStateManager{namespace: "default", nodeID: "node-1"}
+	state := &MountState{
+		VolumeID:     "vol-1",
+		StagingPath:  "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/vol-1/globalmount",
+		TargetPath:   "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/vol-1/globalmount",
+		RemoteName:   "remote",
+		MountParams:  map[string]string{},
+		MountOptions: []string{},
+	}
+
+	secret, err := sm.buildSecret(state)
+
+	require.NoError(t, err)
+	assert.Equal(t, state.StagingPath, secret.StringData[keyStagingPath])
+}
+
+func TestMountStateDeserializeMigratesMissingStagingPath(t *testing.T) {
+	sm := &MountStateManager{}
+	targetPath := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/vol-legacy/globalmount"
+	secret := &corev1.Secret{
+		Data: map[string][]byte{
+			keyVolumeID:   []byte("vol-legacy"),
+			keyTargetPath: []byte(targetPath),
+		},
+	}
+
+	state := sm.deserializeSecret(secret)
+
+	assert.Equal(t, targetPath, state.StagingPath)
+	assert.Equal(t, targetPath, state.TargetPath)
 }

@@ -218,6 +218,7 @@ func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeR
 	if ns.mountStateManager != nil {
 		state := &MountState{
 			VolumeID:     volumeID,
+			StagingPath:  stagingPath,
 			TargetPath:   stagingPath,
 			Timestamp:    time.Now(),
 			ConfigData:   pvp.configData,
