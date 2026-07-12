@@ -83,8 +83,10 @@ type NodeServer struct {
 	Driver            *Driver
 	mounter           mount.Interface
 	mountContext      map[string]*mountContext
+	stagedVolumes     map[string]*stagedVolume
 	mountStateManager *MountStateManager
 	mu                sync.RWMutex
+	stagedVolumesMu   sync.RWMutex
 	configMu          sync.Mutex // Protects concurrent config operations
 	csi.UnimplementedNodeServer
 }

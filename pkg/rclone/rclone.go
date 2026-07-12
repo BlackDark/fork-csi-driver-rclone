@@ -48,12 +48,14 @@ type DriverOptions struct {
 	DriverName string
 	Endpoint   string
 	Remount    bool
+	Staging    bool
 }
 
 // Driver is the main driver structure
 type Driver struct {
 	name        string
 	remount     bool
+	staging     bool
 	nodeID      string
 	version     string
 	endpoint    string
@@ -77,6 +79,7 @@ func NewDriver(options *DriverOptions) *Driver {
 		nodeID:   options.NodeID,
 		endpoint: options.Endpoint,
 		remount:  options.Remount,
+		staging:  options.Staging,
 	}
 
 	d.AddControllerServiceCapabilities([]csi.ControllerServiceCapability_RPC_Type{
@@ -84,11 +87,15 @@ func NewDriver(options *DriverOptions) *Driver {
 		// csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
 	})
 
-	d.AddNodeServiceCapabilities([]csi.NodeServiceCapability_RPC_Type{
+	nodeCaps := []csi.NodeServiceCapability_RPC_Type{
 		csi.NodeServiceCapability_RPC_UNKNOWN,
 		csi.NodeServiceCapability_RPC_VOLUME_CONDITION,
 		csi.NodeServiceCapability_RPC_VOLUME_MOUNT_GROUP,
-	})
+	}
+	if options.Staging {
+		nodeCaps = append(nodeCaps, csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME)
+	}
+	d.AddNodeServiceCapabilities(nodeCaps)
 
 	d.volumeLocks = NewVolumeLocks()
 
