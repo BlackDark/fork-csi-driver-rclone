@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
@@ -210,7 +211,7 @@ func remountViaNsenterMoveMount(pid int, mountPoint, stagingPath string, readOnl
 		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
-	if err := unix.SetCloseOnExec(treeFD, false); err != nil {
+	if err := clearCloseOnExec(int(treeFD)); err != nil {
 		_ = treeFile.Close()
 		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
 	}
@@ -246,7 +247,7 @@ func remountViaSetnsHelper(pid int, mountPoint, stagingPath string, readOnly boo
 		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
-	if err := unix.SetCloseOnExec(treeFD, false); err != nil {
+	if err := clearCloseOnExec(int(treeFD)); err != nil {
 		_ = treeFile.Close()
 		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
 	}
@@ -294,4 +295,13 @@ func remountViaNsenterBind(pid int, mountPoint, stagingPath string, readOnly boo
 
 func shellQuote(value string) string {
 	return strconv.Quote(value)
+}
+
+func clearCloseOnExec(fd int) error {
+	flags, err := syscall.FcntlInt(fd, syscall.F_GETFD, 0)
+	if err != nil {
+		return err
+	}
+	_, err = syscall.FcntlInt(fd, syscall.F_SETFD, flags&^syscall.FD_CLOEXEC)
+	return err
 }
