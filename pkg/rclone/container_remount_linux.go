@@ -211,12 +211,9 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 	}
 
 	cmd := exec.Command(
-		"nsenter",
-		"-t", strconv.Itoa(pid),
-		"-m",
-		"--",
 		helper,
-		containerMoveMountHelperCmd,
+		containerRemountHelperCmd,
+		strconv.Itoa(pid),
 		mountPoint,
 		strconv.FormatBool(readOnly),
 	)
