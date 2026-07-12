@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: volume-recovery-operator
+  namespace: csi-rclone-e2e
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: volume-recovery-operator-e2e
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: volume-recovery-operator-e2e
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: volume-recovery-operator-e2e
+subjects:
+  - kind: ServiceAccount
+    name: volume-recovery-operator
+    namespace: csi-rclone-e2e
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: volume-recovery-operator
+  namespace: csi-rclone-e2e
+spec:
+  selector:
+    matchLabels:
+      app: volume-recovery-operator
+  template:
+    metadata:
+      labels:
+        app: volume-recovery-operator
+    spec:
+      serviceAccountName: volume-recovery-operator
+      hostPID: true
+      containers:
+        - name: operator
+          image: ttl.sh/vro-e2e-1783844648:8h
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          args:
+            - --kubelet-dir=/var/lib/kubelet
+            - --scan-interval=15s
+            - --provisioner=rclone.csi.veloxpack.io
+          volumeMounts:
+            - name: kubelet-pods
+              mountPath: /var/lib/kubelet/pods
+              readOnly: true
+      volumes:
+        - name: kubelet-pods
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
