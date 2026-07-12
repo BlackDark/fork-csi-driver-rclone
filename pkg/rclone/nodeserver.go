@@ -83,6 +83,7 @@ type NodeServer struct {
 	Driver            *Driver
 	mounter           mount.Interface
 	mountContext      map[string]*mountContext
+	mountFilesystem   func(string, string, []string, map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error)
 	stagedVolumes     map[string]*stagedVolume
 	mountStateManager *MountStateManager
 	mu                sync.RWMutex
@@ -1026,13 +1027,6 @@ func (ns *NodeServer) isMountHealthy(targetPath string) (bool, string) {
 	// If we can read the directory, consider it healthy even if we don't have mount context
 	// (this handles edge cases where mount context might be missing but mount is working)
 	return true, ""
-}
-
-// NodeStageVolume is not implemented (rclone doesn't require staging)
-//
-//nolint:lll
-func (ns *NodeServer) NodeStageVolume(_ context.Context, _ *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
 }
 
 // NodeUnstageVolume is not implemented (rclone doesn't require staging)
