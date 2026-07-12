@@ -400,3 +400,69 @@ func TestNodePublishVolumeRestagesUnhealthyStagingMount(t *testing.T) {
 		options: []string{"bind"},
 	}, fm.mounts[2])
 }
+
+func TestNodeUnpublishVolumeUnbindOnly(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	stagingPath := t.TempDir()
+	targetPath := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "vol-unpublish",
+		StagingTargetPath: stagingPath,
+		VolumeCapability:  testMountCapability(),
+		Secrets:           testSecrets(),
+	})
+	require.NoError(t, err)
+
+	_, err = ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:         "vol-unpublish",
+		TargetPath:       targetPath,
+		VolumeCapability: testMountCapability(),
+		Secrets:          testSecrets(),
+	})
+	require.NoError(t, err)
+
+	_, err = ns.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol-unpublish",
+		TargetPath: targetPath,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, fm.unmounts, targetPath)
+	assert.NotContains(t, fm.unmounts, stagingPath)
+	assert.NotNil(t, ns.getStagedVolume("vol-unpublish"))
+	assert.NotNil(t, ns.getMountContext(stagingPath))
+}
+
+func TestNodeUnstageVolumeUnmountFUSE(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	stagingPath := t.TempDir()
+	ns.mountStateManager = &MountStateManager{
+		namespace: "default",
+		nodeID:    "test-node",
+		secrets:   &inMemorySecretClient{},
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "vol-unstage",
+		StagingTargetPath: stagingPath,
+		VolumeCapability:  testMountCapability(),
+		Secrets:           testSecrets(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, ns.getStagedVolume("vol-unstage"))
+	require.NotNil(t, ns.getMountContext(stagingPath))
+
+	_, err = ns.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{
+		VolumeId:          "vol-unstage",
+		StagingTargetPath: stagingPath,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, fm.unmounts, stagingPath)
+	assert.Nil(t, ns.getStagedVolume("vol-unstage"))
+	assert.Nil(t, ns.getMountContext(stagingPath))
+	states, err := ns.mountStateManager.LoadState(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, states)
+}

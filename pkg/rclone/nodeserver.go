@@ -1088,13 +1088,6 @@ func (ns *NodeServer) isMountHealthy(targetPath string) (bool, string) {
 	return true, ""
 }
 
-// NodeUnstageVolume is not implemented (rclone doesn't require staging)
-//
-//nolint:lll
-func (ns *NodeServer) NodeUnstageVolume(_ context.Context, _ *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "")
-}
-
 // NodeGetInfo returns info about the node
 func (ns *NodeServer) NodeGetInfo(_ context.Context, _ *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
 	return &csi.NodeGetInfoResponse{
