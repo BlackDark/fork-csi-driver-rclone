@@ -23,7 +23,8 @@ import (
 )
 
 func TestParseCSIPublishMountPathForRemount(t *testing.T) {
-	path := "/var/lib/kubelet/pods/d90a7bf8-2c55-4fb2-8cd8-b93ee85d82fb/volumes/kubernetes.io~csi/pvc-8a113f5d-e2d9-474f-834f-c0e2883d78e3/mount"
+	path := "/var/lib/kubelet/pods/d90a7bf8-2c55-4fb2-8cd8-b93ee85d82fb/volumes/" +
+		"kubernetes.io~csi/pvc-8a113f5d-e2d9-474f-834f-c0e2883d78e3/mount"
 	podUID, volName, ok := parseCSIPublishMountPath(path)
 	assert.True(t, ok)
 	assert.Equal(t, "d90a7bf8-2c55-4fb2-8cd8-b93ee85d82fb", podUID)

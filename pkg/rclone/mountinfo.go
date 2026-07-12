@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -44,7 +43,7 @@ func readMountInfo(pid int) ([]mountInfoEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var entries []mountInfoEntry
 	scanner := bufio.NewScanner(f)
@@ -88,28 +87,20 @@ func parseMountInfoLine(line string) (mountInfoEntry, bool) {
 	}, true
 }
 
-func getMountInfoForPath(path string) (device, fsType string, ok bool) {
+func getMountInfoForPath(path string) (device, fsType string) {
 	compare := canonicalMountPath(path)
 	entries, err := readMountInfo(0)
 	if err != nil {
-		return "", "", false
+		return "", ""
 	}
 	for _, e := range entries {
 		if canonicalMountPath(e.MountPoint) == compare {
-			return e.Device, e.FSType, true
+			return e.Device, e.FSType
 		}
 	}
-	return "", "", false
+	return "", ""
 }
 
 func isFuseRcloneFSType(fsType string) bool {
 	return fsType == fuseRcloneFSType
-}
-
-func isMountCorruptedViaProcRoot(pid int, mountPoint string) bool {
-	root := filepath.Join(fmt.Sprintf("/proc/%d/root", pid), mountPoint)
-	if corrupted, _ := IsMountPathCorrupted(root); corrupted {
-		return true
-	}
-	return false
 }

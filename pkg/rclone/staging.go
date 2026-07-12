@@ -181,7 +181,9 @@ func (ns *NodeServer) unbindPublish(targetPath string) error {
 	return ns.forceCleanupMount(targetPath)
 }
 
-func (ns *NodeServer) rebuildStagedVolumeAfterRemount(ctx context.Context, state *MountState, stagingPath string) error {
+func (ns *NodeServer) rebuildStagedVolumeAfterRemount(
+	ctx context.Context, state *MountState, stagingPath string,
+) error {
 	ns.setStagedVolume(state.VolumeID, &stagedVolume{
 		volumeID:    state.VolumeID,
 		stagingPath: stagingPath,

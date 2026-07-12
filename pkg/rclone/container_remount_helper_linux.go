@@ -37,8 +37,9 @@ const moveMountFFromTree = 0x8
 const inheritedTreeFD = 3
 
 // RunContainerRemountHelper runs container mount repair helpers when invoked as:
-//   __container-remount <pid> <mountPoint> <readOnly:true|false>  (setns + move_mount; legacy)
-//   __container-move-mount <mountPoint> <readOnly:true|false>     (move_mount only; under nsenter)
+//
+//	__container-remount <pid> <mountPoint> <readOnly:true|false>  (setns + move_mount; legacy)
+//	__container-move-mount <mountPoint> <readOnly:true|false>     (move_mount only; under nsenter)
 func RunContainerRemountHelper(args []string) (handled bool, err error) {
 	if len(args) == 0 {
 		return false, nil
