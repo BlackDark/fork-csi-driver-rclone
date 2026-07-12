@@ -96,18 +96,6 @@ func findContainerPIDsForPod(podUID string) ([]int, error) {
 		if _, ok := seen[pid]; ok {
 			continue
 		}
-		if entries, err := readMountInfo(pid); err == nil {
-			hasFuse := false
-			for _, e := range entries {
-				if isFuseRcloneFSType(e.FSType) {
-					hasFuse = true
-					break
-				}
-			}
-			if !hasFuse {
-				continue
-			}
-		}
 		seen[pid] = struct{}{}
 		pids = append(pids, pid)
 	}
@@ -122,7 +110,18 @@ func findStaleContainerMounts(pid int, hint PublishRemountTarget) ([]string, err
 	if err != nil {
 		return nil, err
 	}
+	seen := map[string]struct{}{}
 	var mountPoints []string
+	add := func(mp string) {
+		if mp == "" {
+			return
+		}
+		if _, ok := seen[mp]; ok {
+			return
+		}
+		seen[mp] = struct{}{}
+		mountPoints = append(mountPoints, mp)
+	}
 	for _, entry := range entries {
 		if !isFuseRcloneFSType(entry.FSType) {
 			continue
@@ -131,12 +130,34 @@ func findStaleContainerMounts(pid int, hint PublishRemountTarget) ([]string, err
 		if !match && isMountCorruptedViaProcRoot(pid, entry.MountPoint) {
 			match = true
 		}
-		if !match {
+		if match {
+			add(entry.MountPoint)
+		}
+	}
+	for _, candidate := range []string{"/data"} {
+		rootPath := filepath.Join(fmt.Sprintf("/proc/%d/root", pid), candidate)
+		if _, err := os.Stat(rootPath); err != nil {
 			continue
 		}
-		mountPoints = append(mountPoints, entry.MountPoint)
+		if corrupted, _ := IsMountPathCorrupted(rootPath); corrupted {
+			add(candidate)
+			continue
+		}
+		// Detached volume: path exists but is no longer a FUSE mount in mountinfo.
+		if !mountPointListed(entries, candidate) {
+			add(candidate)
+		}
 	}
 	return mountPoints, nil
+}
+
+func mountPointListed(entries []mountInfoEntry, mountPoint string) bool {
+	for _, entry := range entries {
+		if entry.MountPoint == mountPoint && isFuseRcloneFSType(entry.FSType) {
+			return true
+		}
+	}
+	return false
 }
 
 func remountStaleFuseInContainers(stagingPath string, target PublishRemountTarget) error {
@@ -171,7 +192,7 @@ func remountStaleFuseInContainers(stagingPath string, target PublishRemountTarge
 }
 
 func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) error {
-	treeFD, treeErr := unix.OpenTree(unix.AT_FDCWD, stagingPath, unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC)
+	treeFD, treeErr := unix.OpenTree(unix.AT_FDCWD, stagingPath, unix.OPEN_TREE_CLONE)
 	if treeErr != nil {
 		klog.V(4).Infof("open_tree failed for %s, using bind fallback: %v", stagingPath, treeErr)
 		return remountViaNsenterBind(pid, mountPoint, stagingPath, readOnly)
@@ -182,7 +203,7 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 	if treeFile == nil {
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
-	defer treeFile.Close()
+	// treeFile must stay open until cmd.Run completes; do not defer Close before Run.
 
 	script := fmt.Sprintf(
 		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --move /proc/self/fd/3 %s",
@@ -192,13 +213,15 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 		script += fmt.Sprintf("; mount -o remount,ro %s", shellQuote(mountPoint))
 	}
 
-	cmd := exec.Command("nsenter", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
+	cmd := exec.Command("nsenter", "--preserve-fds=3", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
 	cmd.ExtraFiles = []*os.File{treeFile}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("nsenter move_mount pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
 	}
+	_ = treeFile.Close()
+	_ = unix.Close(treeFD)
 	return nil
 }
 
@@ -207,7 +230,6 @@ func remountViaNsenterBind(pid int, mountPoint, stagingPath string, readOnly boo
 	if err != nil {
 		return fmt.Errorf("open staging path %s: %w", stagingPath, err)
 	}
-	defer stagingFile.Close()
 
 	script := fmt.Sprintf(
 		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --bind /proc/self/fd/3 %s",
@@ -217,13 +239,14 @@ func remountViaNsenterBind(pid int, mountPoint, stagingPath string, readOnly boo
 		script += fmt.Sprintf("; mount -o remount,ro %s", shellQuote(mountPoint))
 	}
 
-	cmd := exec.Command("nsenter", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
+	cmd := exec.Command("nsenter", "--preserve-fds=3", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
 	cmd.ExtraFiles = []*os.File{stagingFile}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("nsenter bind pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
 	}
+	_ = stagingFile.Close()
 	return nil
 }
 

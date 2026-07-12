@@ -78,6 +78,7 @@ func (ns *NodeServer) collectPublishRemountTargets(stagingPath, volumeID string)
 	stagingMount, stagingMounted := mountByPath[stagingComparePath]
 
 	var targets []PublishRemountTarget
+	seen := map[string]struct{}{}
 	err = filepath.WalkDir(kubeletPodsDir, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if os.IsNotExist(walkErr) {
@@ -97,6 +98,9 @@ func (ns *NodeServer) collectPublishRemountTargets(stagingPath, volumeID string)
 		}
 
 		target := filepath.Clean(path)
+		if _, dup := seen[target]; dup {
+			return nil
+		}
 		targetComparePath := canonicalMountPath(target)
 		mp, mounted := mountByPath[targetComparePath]
 		_, sourceRef := refTargets[targetComparePath]
@@ -123,6 +127,7 @@ func (ns *NodeServer) collectPublishRemountTargets(stagingPath, volumeID string)
 			PreDevice:   device,
 			PreFSType:   fsType,
 		})
+		seen[target] = struct{}{}
 		return nil
 	})
 	if err != nil {
