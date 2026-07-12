@@ -1252,34 +1252,39 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 		return fmt.Errorf("invalid mount state: %w", err)
 	}
 
-	klog.V(2).Infof("Remounting volume %s to %s (remote: %s)", state.VolumeID, state.TargetPath, state.RemoteName)
+	mountPath := state.StagingPath
+	if mountPath == "" {
+		mountPath = state.TargetPath
+	}
 
-	if err := ns.prepareTargetDirectory(state.TargetPath, state.VolumeID); err != nil {
+	klog.V(2).Infof("Remounting volume %s to %s (remote: %s)", state.VolumeID, mountPath, state.RemoteName)
+
+	if err := ns.prepareTargetDirectory(mountPath, state.VolumeID); err != nil {
 		if !errors.Is(err, errMountAlreadyHealthy) {
 			return fmt.Errorf("prepare target directory: %w", err)
 		}
-		if ns.getMountContext(state.TargetPath) != nil {
+		if ns.getMountContext(mountPath) != nil {
 			return nil
 		}
-		if err := ns.forceCleanupMount(state.TargetPath); err != nil {
+		if err := ns.forceCleanupMount(mountPath); err != nil {
 			return fmt.Errorf("cleanup stale mount: %w", err)
 		}
-		if err := os.MkdirAll(state.TargetPath, 0755); err != nil {
+		if err := os.MkdirAll(mountPath, 0755); err != nil {
 			return fmt.Errorf("recreate target directory: %w", err)
 		}
 	}
 
-	notMnt, err := ns.mounter.IsLikelyNotMountPoint(state.TargetPath)
+	notMnt, err := ns.mounter.IsLikelyNotMountPoint(mountPath)
 	if err == nil && !notMnt {
-		if mc := ns.getMountContext(state.TargetPath); mc != nil {
-			if err := ns.unmountVolume(mc, state.TargetPath); err != nil {
-				klog.Warningf("Failed to unmount existing mount at %s: %v", state.TargetPath, err)
+		if mc := ns.getMountContext(mountPath); mc != nil {
+			if err := ns.unmountVolume(mc, mountPath); err != nil {
+				klog.Warningf("Failed to unmount existing mount at %s: %v", mountPath, err)
 			}
-			ns.deleteMountContext(state.TargetPath)
-		} else if err := ns.forceCleanupMount(state.TargetPath); err != nil {
-			klog.Warningf("Failed to force cleanup mount at %s: %v", state.TargetPath, err)
+			ns.deleteMountContext(mountPath)
+		} else if err := ns.forceCleanupMount(mountPath); err != nil {
+			klog.Warningf("Failed to force cleanup mount at %s: %v", mountPath, err)
 		}
-		if err := os.MkdirAll(state.TargetPath, 0755); err != nil {
+		if err := os.MkdirAll(mountPath, 0755); err != nil {
 			return fmt.Errorf("recreate target directory: %w", err)
 		}
 	}
@@ -1305,15 +1310,15 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 	}()
 
 	fsPath := buildFsPath(pvp.remoteName, pvp.remotePath)
-	mountPoint, _, cancel, err := ns.createAndMountFilesystem(
-		fsPath, state.TargetPath, state.MountOptions, pvp.params,
+	mountPoint, _, cancel, err := ns.mountRcloneFilesystem(
+		fsPath, mountPath, state.MountOptions, pvp.params,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to mount filesystem: %w", err)
 	}
 
 	mountSuccess = true
-	ns.setMountContext(state.TargetPath, &mountContext{
+	ns.setMountContext(mountPath, &mountContext{
 		mountPoint: mountPoint,
 		remoteName: pvp.remoteName,
 		remotes:    remotes,
@@ -1327,7 +1332,7 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 		}
 	}
 
-	klog.V(2).Infof("Successfully remounted volume %s to %s", state.VolumeID, state.TargetPath)
+	klog.V(2).Infof("Successfully remounted volume %s to %s", state.VolumeID, mountPath)
 	return nil
 }
 

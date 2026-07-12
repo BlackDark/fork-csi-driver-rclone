@@ -527,6 +527,9 @@ func extractVolumeID(targetPath string) string {
 		if part == "kubernetes.io~csi" && i+1 < len(parts) {
 			return parts[i+1]
 		}
+		if part == "pv" && i+2 < len(parts) && parts[i+2] == "globalmount" {
+			return parts[i+1]
+		}
 	}
 	// Fallback: use last component
 	if len(parts) > 0 {

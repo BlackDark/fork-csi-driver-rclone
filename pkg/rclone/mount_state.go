@@ -43,6 +43,7 @@ const (
 	labelNodeID       = "csi.veloxpack.io/node"
 
 	keyVolumeID     = "volumeId"
+	keyStagingPath  = "stagingPath"
 	keyTargetPath   = "targetPath"
 	keyTimestamp    = "timestamp"
 	keyConfigData   = "configData"
@@ -56,9 +57,10 @@ const (
 
 // MountState represents the complete state needed to remount a volume.
 type MountState struct {
-	VolumeID   string    `json:"volumeId"`
-	TargetPath string    `json:"targetPath"`
-	Timestamp  time.Time `json:"timestamp"`
+	VolumeID    string    `json:"volumeId"`
+	StagingPath string    `json:"stagingPath"`
+	TargetPath  string    `json:"targetPath"`
+	Timestamp   time.Time `json:"timestamp"`
 
 	ConfigData string `json:"configData"`
 	RemoteName string `json:"remoteName"`
@@ -120,13 +122,17 @@ func (sm *MountStateManager) makeSecretName(volumeID string) string {
 
 func (sm *MountStateManager) deserializeSecret(secret *v1.Secret) *MountState {
 	state := &MountState{
-		VolumeID:   byteToString(secret.Data[keyVolumeID]),
-		TargetPath: byteToString(secret.Data[keyTargetPath]),
-		ConfigData: byteToString(secret.Data[keyConfigData]),
-		RemoteName: byteToString(secret.Data[keyRemoteName]),
-		RemotePath: byteToString(secret.Data[keyRemotePath]),
-		RemoteType: byteToString(secret.Data[keyRemoteType]),
-		ReadOnly:   byteToString(secret.Data[keyReadOnly]) == trueValue,
+		VolumeID:    byteToString(secret.Data[keyVolumeID]),
+		StagingPath: byteToString(secret.Data[keyStagingPath]),
+		TargetPath:  byteToString(secret.Data[keyTargetPath]),
+		ConfigData:  byteToString(secret.Data[keyConfigData]),
+		RemoteName:  byteToString(secret.Data[keyRemoteName]),
+		RemotePath:  byteToString(secret.Data[keyRemotePath]),
+		RemoteType:  byteToString(secret.Data[keyRemoteType]),
+		ReadOnly:    byteToString(secret.Data[keyReadOnly]) == trueValue,
+	}
+	if state.StagingPath == "" {
+		state.StagingPath = state.TargetPath
 	}
 
 	if ts := string(secret.Data[keyTimestamp]); ts != "" {
@@ -226,6 +232,7 @@ func (sm *MountStateManager) buildSecret(state *MountState) (*v1.Secret, error) 
 		Type: v1.SecretTypeOpaque,
 		StringData: map[string]string{
 			keyVolumeID:     state.VolumeID,
+			keyStagingPath:  state.StagingPath,
 			keyTargetPath:   state.TargetPath,
 			keyConfigData:   state.ConfigData,
 			keyRemoteName:   state.RemoteName,

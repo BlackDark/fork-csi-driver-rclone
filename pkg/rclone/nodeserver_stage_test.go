@@ -298,6 +298,63 @@ func TestNodeStageVolumeRemountsAfterUnhealthyCachedStage(t *testing.T) {
 	assert.NotNil(t, ns.getMountContext(stagingPath))
 }
 
+func TestNodeStageVolumePersistsStagingPath(t *testing.T) {
+	ns, _ := newTestNodeServerWithStaging(t)
+	stagingPath := t.TempDir()
+	ns.mountStateManager = &MountStateManager{
+		namespace: "default",
+		nodeID:    "test-node",
+		secrets:   &inMemorySecretClient{},
+	}
+
+	_, err := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "vol-stage-state",
+		StagingTargetPath: stagingPath,
+		VolumeCapability:  testMountCapability(),
+		Secrets:           testSecrets(),
+	})
+
+	require.NoError(t, err)
+	states, err := ns.mountStateManager.LoadState(context.Background())
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	assert.Equal(t, stagingPath, states[0].StagingPath)
+	assert.Equal(t, stagingPath, states[0].TargetPath)
+}
+
+func TestRemountStateUsesStagingPath(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	stagingPath := testStagingPath(t)
+	targetPath := t.TempDir()
+	var mountedPath string
+	ns.mountFilesystem = func(_ string, targetPath string, _ []string, _ map[string]string) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
+		mountedPath = targetPath
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		return nil, cancelCtx, cancel, fm.Mount("test", targetPath, "", nil)
+	}
+
+	err := ns.RemountState(context.Background(), &MountState{
+		VolumeID:     "vol-remount-stage",
+		StagingPath:  stagingPath,
+		TargetPath:   targetPath,
+		ConfigData:   "[remote]\ntype = local\n",
+		RemoteName:   "remote",
+		MountParams:  map[string]string{},
+		MountOptions: []string{},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, stagingPath, mountedPath)
+	assert.NotNil(t, ns.getMountContext(stagingPath))
+	assert.Nil(t, ns.getMountContext(targetPath))
+}
+
+func TestExtractVolumeIDFromStagingPath(t *testing.T) {
+	path := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/pvc-123/globalmount"
+
+	assert.Equal(t, "pvc-123", extractVolumeID(path))
+}
+
 func TestNodePublishVolumeBindFromStaging(t *testing.T) {
 	ns, fm := newTestNodeServerWithStaging(t)
 	stagingPath := t.TempDir()
