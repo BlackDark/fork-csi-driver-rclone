@@ -1,0 +1,45 @@
+image:
+  rclone:
+    repository: ttl.sh/csi-rclone-e2e-1783844648
+    tag: "8h"
+    pullPolicy: Always
+
+node:
+  remount:
+    enabled: true
+  terminationGracePeriodSeconds: 120
+  resources:
+    rclone:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+
+controller:
+  resources:
+    rclone:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 50m
+        memory: 128Mi
+
+storageClass:
+  create: true
+  name: rclone-e2e
+  reclaimPolicy: Delete
+  volumeBindingMode: Immediate
+  mountOptions:
+    - allow-other
+    - vfs-cache-mode=off
+  parameters:
+    remote: minio
+    remotePath: e2e-bucket
+    configData: |
+      [minio]
+      type = s3
+      provider = Minio
+      endpoint = http://minio.csi-rclone-e2e.svc.cluster.local:9000
+      access_key_id = minioadmin
+      secret_access_key = minioadmin
