@@ -197,56 +197,51 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 		klog.V(4).Infof("open_tree failed for %s, using bind fallback: %v", stagingPath, treeErr)
 		return remountViaNsenterBind(pid, mountPoint, stagingPath, readOnly)
 	}
-	defer unix.Close(treeFD)
 
 	treeFile := os.NewFile(uintptr(treeFD), "tree")
 	if treeFile == nil {
+		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
-	// treeFile must stay open until cmd.Run completes; do not defer Close before Run.
 
-	script := fmt.Sprintf(
-		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --move /proc/self/fd/3 %s",
-		shellQuote(mountPoint), shellQuote(mountPoint), shellQuote(mountPoint),
-	)
-	if readOnly {
-		script += fmt.Sprintf("; mount -o remount,ro %s", shellQuote(mountPoint))
+	helper, err := os.Executable()
+	if err != nil {
+		_ = treeFile.Close()
+		return fmt.Errorf("resolve helper binary: %w", err)
 	}
 
-	cmd := exec.Command("nsenter", "--preserve-fds=3", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
+	cmd := exec.Command(
+		helper,
+		containerRemountHelperCmd,
+		strconv.Itoa(pid),
+		mountPoint,
+		strconv.FormatBool(readOnly),
+	)
 	cmd.ExtraFiles = []*os.File{treeFile}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("nsenter move_mount pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("container remount helper pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
 	}
 	_ = treeFile.Close()
-	_ = unix.Close(treeFD)
 	return nil
 }
 
 func remountViaNsenterBind(pid int, mountPoint, stagingPath string, readOnly bool) error {
-	stagingFile, err := os.Open(stagingPath)
-	if err != nil {
-		return fmt.Errorf("open staging path %s: %w", stagingPath, err)
-	}
-
 	script := fmt.Sprintf(
-		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --bind /proc/self/fd/3 %s",
-		shellQuote(mountPoint), shellQuote(mountPoint), shellQuote(mountPoint),
+		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --bind %s %s",
+		shellQuote(mountPoint), shellQuote(mountPoint), shellQuote(stagingPath), shellQuote(mountPoint),
 	)
 	if readOnly {
 		script += fmt.Sprintf("; mount -o remount,ro %s", shellQuote(mountPoint))
 	}
 
-	cmd := exec.Command("nsenter", "--preserve-fds=3", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
-	cmd.ExtraFiles = []*os.File{stagingFile}
+	cmd := exec.Command("nsenter", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("nsenter bind pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
 	}
-	_ = stagingFile.Close()
 	return nil
 }
 
