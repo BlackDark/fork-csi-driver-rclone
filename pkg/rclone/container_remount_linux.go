@@ -192,6 +192,49 @@ func remountStaleFuseInContainers(stagingPath string, target PublishRemountTarge
 }
 
 func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) error {
+	if err := remountViaNsenterMoveMount(pid, mountPoint, stagingPath, readOnly); err != nil {
+		klog.V(4).Infof("nsenter move_mount failed for pid %d mount %s, trying setns helper: %v", pid, mountPoint, err)
+		return remountViaSetnsHelper(pid, mountPoint, stagingPath, readOnly)
+	}
+	return nil
+}
+
+func remountViaNsenterMoveMount(pid int, mountPoint, stagingPath string, readOnly bool) error {
+	treeFD, treeErr := unix.OpenTree(unix.AT_FDCWD, stagingPath, unix.OPEN_TREE_CLONE)
+	if treeErr != nil {
+		return remountViaNsenterBind(pid, mountPoint, stagingPath, readOnly)
+	}
+
+	treeFile := os.NewFile(uintptr(treeFD), "tree")
+	if treeFile == nil {
+		_ = unix.Close(treeFD)
+		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
+	}
+	if err := unix.SetCloseOnExec(treeFD, false); err != nil {
+		_ = treeFile.Close()
+		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
+	}
+
+	script := fmt.Sprintf(
+		"umount -l %s 2>/dev/null || true; mkdir -p %s; mount --move /proc/self/fd/3 %s",
+		shellQuote(mountPoint), shellQuote(mountPoint), shellQuote(mountPoint),
+	)
+	if readOnly {
+		script += fmt.Sprintf("; mount -o remount,ro %s", shellQuote(mountPoint))
+	}
+
+	cmd := exec.Command("nsenter", "-F", "-t", strconv.Itoa(pid), "-m", "--", "/bin/sh", "-c", script)
+	cmd.ExtraFiles = []*os.File{treeFile}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("nsenter move_mount pid %d mount %s: %w (%s)", pid, mountPoint, err, strings.TrimSpace(stderr.String()))
+	}
+	_ = treeFile.Close()
+	return nil
+}
+
+func remountViaSetnsHelper(pid int, mountPoint, stagingPath string, readOnly bool) error {
 	treeFD, treeErr := unix.OpenTree(unix.AT_FDCWD, stagingPath, unix.OPEN_TREE_CLONE)
 	if treeErr != nil {
 		klog.V(4).Infof("open_tree failed for %s, using bind fallback: %v", stagingPath, treeErr)
@@ -202,6 +245,10 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 	if treeFile == nil {
 		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
+	}
+	if err := unix.SetCloseOnExec(treeFD, false); err != nil {
+		_ = treeFile.Close()
+		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
 	}
 
 	helper, err := os.Executable()
