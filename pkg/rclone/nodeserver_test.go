@@ -19,12 +19,16 @@ package rclone
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	mount "k8s.io/mount-utils"
 )
 
 func getTestNodeServer() (NodeServer, error) {
@@ -216,4 +220,105 @@ func TestUnimplementedNodeMethods(t *testing.T) {
 	_, err = ns.NodeExpandVolume(ctx, &csi.NodeExpandVolumeRequest{})
 	assert.Error(t, err)
 	assert.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
+func newTestNodeServerWithMounter(m mount.Interface) NodeServer {
+	d := NewEmptyDriver("")
+	d.AddNodeServiceCapabilities([]csi.NodeServiceCapability_RPC_Type{
+		csi.NodeServiceCapability_RPC_UNKNOWN,
+	})
+	return NodeServer{
+		Driver:  d,
+		mounter: m,
+	}
+}
+
+func TestPrepareTargetDirectoryHealthyMountReturnsSentinel(t *testing.T) {
+	dir := t.TempDir()
+	absDir, err := filepath.EvalSymlinks(dir)
+	assert.NoError(t, err)
+	fm := mount.NewFakeMounter([]mount.MountPoint{{Path: absDir, Device: "test"}})
+	ns := newTestNodeServerWithMounter(fm)
+
+	err = ns.prepareTargetDirectory(dir, testVolumeID)
+	assert.ErrorIs(t, err, errMountAlreadyHealthy)
+}
+
+func TestPrepareTargetDirectoryInaccessibleMountTriggersCleanup(t *testing.T) {
+	dir := t.TempDir()
+	mountFile := filepath.Join(dir, "mount-target")
+	assert.NoError(t, os.WriteFile(mountFile, []byte("x"), 0644))
+	absMountFile, err := filepath.EvalSymlinks(mountFile)
+	assert.NoError(t, err)
+
+	fm := mount.NewFakeMounter([]mount.MountPoint{{Path: absMountFile, Device: "test"}})
+	ns := newTestNodeServerWithMounter(fm)
+
+	err = ns.prepareTargetDirectory(mountFile, testVolumeID)
+	assert.NoError(t, err)
+	assert.Empty(t, fm.MountPoints)
+}
+
+func TestNodePublishVolumeIdempotentWithMountContext(t *testing.T) {
+	dir := t.TempDir()
+	absDir, err := filepath.EvalSymlinks(dir)
+	assert.NoError(t, err)
+	fm := mount.NewFakeMounter([]mount.MountPoint{{Path: absDir, Device: "test"}})
+	ns := newTestNodeServerWithMounter(fm)
+	ns.setMountContext(dir, &mountContext{remoteName: testRemote})
+
+	resp, err := ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:   testVolumeID,
+		TargetPath: dir,
+		VolumeCapability: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{
+				Mount: &csi.VolumeCapability_MountVolume{},
+			},
+		},
+		VolumeContext: map[string]string{
+			paramRemote:     testRemote,
+			paramRemotePath: testRemotePath,
+			paramConfigData: "[s3]\ntype = s3\n",
+		},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, resp)
+}
+
+func TestAcquireVolumeLockRetry(t *testing.T) {
+	ns, err := getTestNodeServer()
+	assert.NoError(t, err)
+
+	lockKey := "vol-lock-test"
+	ns.Driver.volumeLocks.TryAcquire(lockKey)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(50 * time.Millisecond)
+		ns.Driver.volumeLocks.Release(lockKey)
+	}()
+
+	release, err := ns.acquireVolumeLock(lockKey, testVolumeID)
+	assert.NoError(t, err)
+	assert.NotNil(t, release)
+	release()
+	<-done
+}
+
+func TestAcquireVolumeLockExhaustedRetries(t *testing.T) {
+	ns, err := getTestNodeServer()
+	assert.NoError(t, err)
+
+	lockKey := "vol-lock-held"
+	ns.Driver.volumeLocks.TryAcquire(lockKey)
+	defer ns.Driver.volumeLocks.Release(lockKey)
+
+	start := time.Now()
+	_, err = ns.acquireVolumeLock(lockKey, testVolumeID)
+	elapsed := time.Since(start)
+
+	assert.Error(t, err)
+	assert.Equal(t, codes.Aborted, status.Code(err))
+	assert.GreaterOrEqual(t, elapsed, time.Duration(volumeLockMaxRetries-1)*volumeLockRetryDelay)
 }

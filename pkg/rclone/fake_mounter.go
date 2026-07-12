@@ -19,6 +19,7 @@ package rclone
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	mount "k8s.io/mount-utils"
 )
@@ -58,6 +59,11 @@ func (f *fakeMounter) IsLikelyNotMountPoint(file string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// UnmountWithForce implements mount.MounterForceUnmounter for tests.
+func (f *fakeMounter) UnmountWithForce(target string, _ time.Duration) error {
+	return f.Unmount(target)
 }
 
 func NewFakeMounter() (*mount.SafeFormatAndMount, error) {

@@ -18,6 +18,7 @@ package rclone
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -54,6 +55,11 @@ const (
 	paramVolumeMountAllowOther = "allow_other"
 )
 
+const (
+	volumeLockMaxRetries = 5
+	volumeLockRetryDelay = 200 * time.Millisecond
+)
+
 // reservedParams contains parameter names that should not be passed to rclone backend
 var reservedParams = map[string]bool{
 	paramRemote:      true,
@@ -74,11 +80,12 @@ type mountContext struct {
 
 // NodeServer implements the CSI Node service
 type NodeServer struct {
-	Driver       *Driver
-	mounter      mount.Interface
-	mountContext map[string]*mountContext
-	mu           sync.RWMutex
-	configMu     sync.Mutex // Protects concurrent config operations
+	Driver            *Driver
+	mounter           mount.Interface
+	mountContext      map[string]*mountContext
+	mountStateManager *MountStateManager
+	mu                sync.RWMutex
+	configMu          sync.Mutex // Protects concurrent config operations
 	csi.UnimplementedNodeServer
 }
 
@@ -277,7 +284,7 @@ func extractPublishParams(params map[string]string) (*publishVolumeParams, error
 	return pvp, nil
 }
 
-// prepareTargetDirectory ensures the target directory exists and is not already mounted
+// prepareTargetDirectory ensures the target directory exists and handles stale mounts.
 func (ns *NodeServer) prepareTargetDirectory(targetPath string, volumeID string) error {
 	notMnt, err := ns.mounter.IsLikelyNotMountPoint(targetPath)
 	if err != nil {
@@ -289,38 +296,55 @@ func (ns *NodeServer) prepareTargetDirectory(targetPath string, volumeID string)
 		} else {
 			return status.Error(codes.Internal, err.Error())
 		}
-	} else {
-		// Check if already mounted
-		if !notMnt {
-			klog.V(2).Infof("Target path %s is already mounted", targetPath)
-			return nil // Signal that mount already exists
-		}
 	}
 
-	// Ensure target directory has correct permissions
+	if !notMnt {
+		klog.V(2).Infof("Target path %s is already mounted", targetPath)
+		_, readErr := os.ReadDir(targetPath)
+		if readErr == nil {
+			klog.V(4).Infof("Volume %s already mounted to %s and accessible", volumeID, targetPath)
+			return errMountAlreadyHealthy
+		}
+
+		klog.Warningf("Mount point %s appears mounted but is not accessible (err: %v), attempting recovery", targetPath, readErr)
+		if err := ns.forceCleanupMount(targetPath); err != nil {
+			klog.Errorf("Failed to unmount corrupted mount point %s: %v", targetPath, err)
+			return status.Errorf(codes.Internal, "corrupted mount could not be cleaned up: %v", err)
+		}
+		if err := os.MkdirAll(targetPath, 0755); err != nil {
+			return status.Errorf(codes.Internal, "failed to recreate target directory after cleanup: %v", err)
+		}
+		klog.V(2).Infof("Successfully unmounted corrupted mount point %s, will remount", targetPath)
+	}
+
 	if err := os.Chmod(targetPath, 0755); err != nil {
 		klog.Warningf("Failed to set permissions on target path %s: %v", targetPath, err)
 	}
 
-	// If already mounted, verify the mount is valid
-	if !notMnt {
-		if _, err := os.ReadDir(targetPath); err == nil {
-			klog.V(4).Infof("Volume %s already mounted to %s and accessible", volumeID, targetPath)
-			return nil
-		}
-
-		// Mount appears to exist but is not accessible - recover
-		klog.Warningf("Mount point %s appears mounted but is not accessible (err: %v), attempting recovery", targetPath, err)
-
-		if err := ns.mounter.Unmount(targetPath); err != nil {
-			klog.Errorf("Failed to unmount corrupted mount point %s: %v", targetPath, err)
-			return status.Errorf(codes.Internal, "corrupted mount could not be cleaned up: %v", err)
-		}
-
-		klog.V(2).Infof("Successfully unmounted corrupted mount point %s, will remount", targetPath)
-	}
-
 	return nil
+}
+
+// forceCleanupMount unmounts a mount point using force when available.
+func (ns *NodeServer) forceCleanupMount(targetPath string) error {
+	extensiveMountPointCheck := true
+	forceUnmounter, ok := ns.mounter.(mount.MounterForceUnmounter)
+	if ok {
+		return mount.CleanupMountWithForce(targetPath, forceUnmounter, extensiveMountPointCheck, 30*time.Second)
+	}
+	return mount.CleanupMountPoint(targetPath, ns.mounter, extensiveMountPointCheck)
+}
+
+// acquireVolumeLock retries TryAcquire before returning Aborted for overlapping kubelet calls.
+func (ns *NodeServer) acquireVolumeLock(lockKey, volumeID string) (func(), error) {
+	for attempt := 0; attempt < volumeLockMaxRetries; attempt++ {
+		if ns.Driver.volumeLocks.TryAcquire(lockKey) {
+			return func() { ns.Driver.volumeLocks.Release(lockKey) }, nil
+		}
+		if attempt < volumeLockMaxRetries-1 {
+			time.Sleep(volumeLockRetryDelay)
+		}
+	}
+	return nil, status.Errorf(codes.Aborted, volumeOperationAlreadyExistsFmt, volumeID)
 }
 
 // generateConfigData generates rclone config from parameters if needed
@@ -820,10 +844,11 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 
 	// Acquire lock for this volume operation
 	lockKey := fmt.Sprintf("%s-%s", volumeID, targetPath)
-	if acquired := ns.Driver.volumeLocks.TryAcquire(lockKey); !acquired {
-		return nil, status.Errorf(codes.Aborted, volumeOperationAlreadyExistsFmt, volumeID)
+	release, err := ns.acquireVolumeLock(lockKey, volumeID)
+	if err != nil {
+		return nil, err
 	}
-	defer ns.Driver.volumeLocks.Release(lockKey)
+	defer release()
 
 	// Get mount options from VolumeCapability (CSI standard)
 	readOnly := req.GetReadonly()
@@ -858,11 +883,21 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 
 	// Prepare target directory and check if already mounted
 	if err := ns.prepareTargetDirectory(targetPath, volumeID); err != nil {
-		if err.Error() == "" {
-			// Already mounted and accessible
-			return &csi.NodePublishVolumeResponse{}, nil
+		if errors.Is(err, errMountAlreadyHealthy) {
+			if ns.getMountContext(targetPath) != nil {
+				klog.V(2).Infof("Volume %s already published at %s", volumeID, targetPath)
+				return &csi.NodePublishVolumeResponse{}, nil
+			}
+			klog.V(2).Infof("Volume %s has healthy mount at %s but no driver context, remounting", volumeID, targetPath)
+			if err := ns.forceCleanupMount(targetPath); err != nil {
+				return nil, status.Errorf(codes.Internal, "failed to cleanup stale mount before remount: %v", err)
+			}
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				return nil, status.Errorf(codes.Internal, "failed to recreate target directory after cleanup: %v", err)
+			}
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
 
 	klog.V(2).Infof("NodePublishVolume: mounting %s:%s at %s", pvp.remoteName, pvp.remotePath, targetPath)
@@ -907,6 +942,24 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		ctx:        ctx,
 	})
 
+	if ns.mountStateManager != nil {
+		state := &MountState{
+			VolumeID:     volumeID,
+			TargetPath:   targetPath,
+			Timestamp:    time.Now(),
+			ConfigData:   pvp.configData,
+			RemoteName:   pvp.remoteName,
+			RemotePath:   pvp.remotePath,
+			RemoteType:   pvp.remoteType,
+			MountParams:  pvp.params,
+			MountOptions: mountOptions,
+			ReadOnly:     readOnly,
+		}
+		if err := ns.mountStateManager.SaveState(ctx, state); err != nil {
+			klog.Warningf("Failed to save mount state for volume %s: %v", volumeID, err)
+		}
+	}
+
 	klog.V(2).Infof("Successfully mounted volume %s to %s (remote: %s)", volumeID, targetPath, pvp.remoteName)
 	return &csi.NodePublishVolumeResponse{}, nil
 }
@@ -914,7 +967,7 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 // NodeUnpublishVolume unmounts the rclone volume using direct stats access
 //
 //nolint:lll
-func (ns *NodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	// Validate request
 	if err := validateUnpublishVolumeRequest(req); err != nil {
 		return nil, err
@@ -925,10 +978,11 @@ func (ns *NodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpubl
 
 	// Acquire lock for this volume operation
 	lockKey := fmt.Sprintf("%s-%s", volumeID, targetPath)
-	if acquired := ns.Driver.volumeLocks.TryAcquire(lockKey); !acquired {
-		return nil, status.Errorf(codes.Aborted, volumeOperationAlreadyExistsFmt, volumeID)
+	release, err := ns.acquireVolumeLock(lockKey, volumeID)
+	if err != nil {
+		return nil, err
 	}
-	defer ns.Driver.volumeLocks.Release(lockKey)
+	defer release()
 
 	klog.V(2).Infof("NodeUnpublishVolume: unmounting volume %s from %s", volumeID, targetPath)
 
@@ -938,8 +992,13 @@ func (ns *NodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpubl
 		return nil, status.Errorf(codes.Internal, "failed to unmount target %q: %v", targetPath, err)
 	}
 
-	// Remove mount context
 	ns.deleteMountContext(targetPath)
+
+	if ns.mountStateManager != nil {
+		if err := ns.mountStateManager.DeleteState(ctx, volumeID, targetPath); err != nil {
+			klog.Warningf("Failed to delete mount state for volume %s: %v", volumeID, err)
+		}
+	}
 
 	klog.V(2).Infof("Successfully unmounted volume %s from %s", volumeID, targetPath)
 	return &csi.NodeUnpublishVolumeResponse{}, nil
@@ -947,9 +1006,9 @@ func (ns *NodeServer) NodeUnpublishVolume(_ context.Context, req *csi.NodeUnpubl
 
 // isMountHealthy checks if a mount is healthy and returns a detailed error message
 func (ns *NodeServer) isMountHealthy(targetPath string) (bool, string) {
-	// Check if mount point is accessible
-	if _, err := os.ReadDir(targetPath); err != nil {
-		return false, fmt.Sprintf("mount point not accessible: %v", err)
+	healthy, msg := IsMountPathHealthy(targetPath, ns.mounter)
+	if !healthy {
+		return false, msg
 	}
 
 	// Check VFS stats for errors if mount context is available
@@ -1080,4 +1139,173 @@ func (ns *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVo
 //nolint:lll
 func (ns *NodeServer) NodeExpandVolume(_ context.Context, _ *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "")
+}
+
+// UnmountAll unmounts all active volume mounts gracefully.
+func (ns *NodeServer) UnmountAll(ctx context.Context) error {
+	ns.mu.RLock()
+	mountContexts := make(map[string]*mountContext, len(ns.mountContext))
+	for targetPath, mc := range ns.mountContext {
+		mountContexts[targetPath] = mc
+	}
+	ns.mu.RUnlock()
+
+	if len(mountContexts) == 0 {
+		klog.Info("No active mounts to unmount")
+		return nil
+	}
+
+	klog.Infof("Unmounting %d active volumes", len(mountContexts))
+
+	var wg sync.WaitGroup
+	errorChan := make(chan error, len(mountContexts))
+
+	for targetPath, mc := range mountContexts {
+		wg.Add(1)
+		go func(path string, mctx *mountContext) {
+			defer wg.Done()
+			if err := ns.unmountVolume(mctx, path); err != nil {
+				errorChan <- fmt.Errorf("failed to unmount %s: %w", path, err)
+				return
+			}
+			ns.deleteMountContext(path)
+		}(targetPath, mc)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+		close(errorChan)
+	}()
+
+	select {
+	case <-done:
+		var errMsgs []string
+		for err := range errorChan {
+			errMsgs = append(errMsgs, err.Error())
+		}
+		if len(errMsgs) > 0 {
+			return fmt.Errorf("unmount errors: %s", strings.Join(errMsgs, "; "))
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("unmount timeout: %w", ctx.Err())
+	}
+}
+
+// RemountState remounts a volume from a saved MountState after driver restart.
+func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error {
+	if err := state.Validate(); err != nil {
+		return fmt.Errorf("invalid mount state: %w", err)
+	}
+
+	klog.V(2).Infof("Remounting volume %s to %s (remote: %s)", state.VolumeID, state.TargetPath, state.RemoteName)
+
+	if err := ns.prepareTargetDirectory(state.TargetPath, state.VolumeID); err != nil {
+		if !errors.Is(err, errMountAlreadyHealthy) {
+			return fmt.Errorf("prepare target directory: %w", err)
+		}
+		if ns.getMountContext(state.TargetPath) != nil {
+			return nil
+		}
+		if err := ns.forceCleanupMount(state.TargetPath); err != nil {
+			return fmt.Errorf("cleanup stale mount: %w", err)
+		}
+		if err := os.MkdirAll(state.TargetPath, 0755); err != nil {
+			return fmt.Errorf("recreate target directory: %w", err)
+		}
+	}
+
+	notMnt, err := ns.mounter.IsLikelyNotMountPoint(state.TargetPath)
+	if err == nil && !notMnt {
+		if mc := ns.getMountContext(state.TargetPath); mc != nil {
+			if err := ns.unmountVolume(mc, state.TargetPath); err != nil {
+				klog.Warningf("Failed to unmount existing mount at %s: %v", state.TargetPath, err)
+			}
+			ns.deleteMountContext(state.TargetPath)
+		} else if err := ns.forceCleanupMount(state.TargetPath); err != nil {
+			klog.Warningf("Failed to force cleanup mount at %s: %v", state.TargetPath, err)
+		}
+		if err := os.MkdirAll(state.TargetPath, 0755); err != nil {
+			return fmt.Errorf("recreate target directory: %w", err)
+		}
+	}
+
+	pvp := &publishVolumeParams{
+		remoteName: state.RemoteName,
+		remotePath: state.RemotePath,
+		configData: state.ConfigData,
+		remoteType: state.RemoteType,
+		params:     state.MountParams,
+	}
+
+	remotes, err := ns.loadRcloneConfig(ctx, pvp)
+	if err != nil {
+		return fmt.Errorf("failed to load rclone config: %w", err)
+	}
+
+	var mountSuccess bool
+	defer func() {
+		if !mountSuccess {
+			ns.cleanupConfigRemotes(remotes)
+		}
+	}()
+
+	fsPath := buildFsPath(pvp.remoteName, pvp.remotePath)
+	mountPoint, _, cancel, err := ns.createAndMountFilesystem(
+		fsPath, state.TargetPath, state.MountOptions, pvp.params,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to mount filesystem: %w", err)
+	}
+
+	mountSuccess = true
+	ns.setMountContext(state.TargetPath, &mountContext{
+		mountPoint: mountPoint,
+		remoteName: pvp.remoteName,
+		remotes:    remotes,
+		cancel:     cancel,
+	})
+
+	if ns.mountStateManager != nil {
+		state.Timestamp = time.Now()
+		if err := ns.mountStateManager.SaveState(ctx, state); err != nil {
+			klog.Warningf("Failed to update mount state for volume %s: %v", state.VolumeID, err)
+		}
+	}
+
+	klog.V(2).Infof("Successfully remounted volume %s to %s", state.VolumeID, state.TargetPath)
+	return nil
+}
+
+// RemountAllStates loads saved mount states for this node and remounts them.
+func (ns *NodeServer) RemountAllStates(ctx context.Context) error {
+	if ns.mountStateManager == nil {
+		return nil
+	}
+
+	states, err := ns.mountStateManager.LoadState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load mount states: %w", err)
+	}
+
+	if len(states) == 0 {
+		return nil
+	}
+
+	klog.Infof("Remounting %d persisted mount states", len(states))
+
+	errorCount := 0
+	for _, state := range states {
+		if err := ns.RemountState(ctx, state); err != nil {
+			klog.Errorf("Failed to remount volume %s: %v", state.VolumeID, err)
+			errorCount++
+		}
+	}
+
+	if errorCount > 0 {
+		return fmt.Errorf("failed to remount %d of %d volumes", errorCount, len(states))
+	}
+	return nil
 }
