@@ -1,3 +1,4 @@
+# Use with hack/e2e/helm-values.yaml; this overlay only enables staging/remount.
 node:
   staging:
     enabled: true
