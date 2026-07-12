@@ -18,13 +18,19 @@ package rclone
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
+	mount "k8s.io/mount-utils"
 )
+
+var kubeletPodsDir = "/var/lib/kubelet/pods"
 
 // stagedVolume tracks a FUSE mount at the node-global staging path for a volume.
 type stagedVolume struct {
@@ -81,6 +87,9 @@ func (ns *NodeServer) getStagingPathForPublish(ctx context.Context, volumeID str
 		return sv.stagingPath
 	}
 	if state := ns.findStagingMountState(ctx, volumeID); state != nil {
+		if state.StagingPath != "" {
+			return state.StagingPath
+		}
 		return state.TargetPath
 	}
 	return getDefaultStagingPath(volumeID)
@@ -96,7 +105,10 @@ func (ns *NodeServer) findStagingMountState(ctx context.Context, volumeID string
 		return nil
 	}
 	for _, state := range states {
-		if state.VolumeID == volumeID && isLikelyStagingPath(state.TargetPath) {
+		if state.VolumeID != volumeID {
+			continue
+		}
+		if isLikelyStagingPath(state.StagingPath) || isLikelyStagingPath(state.TargetPath) {
 			return state
 		}
 	}
@@ -151,4 +163,161 @@ func (ns *NodeServer) bindPublish(stagingPath, targetPath string, readOnly bool)
 
 func (ns *NodeServer) unbindPublish(targetPath string) error {
 	return ns.forceCleanupMount(targetPath)
+}
+
+func (ns *NodeServer) rebuildStagedVolumeAfterRemount(state *MountState, stagingPath string) error {
+	ns.setStagedVolume(state.VolumeID, &stagedVolume{
+		volumeID:    state.VolumeID,
+		stagingPath: stagingPath,
+		mountCtx:    ns.getMountContext(stagingPath),
+	})
+	if err := ns.refreshPublishBindsForVolume(stagingPath, state.VolumeID); err != nil {
+		return fmt.Errorf("refresh publish binds: %w", err)
+	}
+	return nil
+}
+
+func (ns *NodeServer) refreshPublishBinds(stagingPath string) error {
+	return ns.refreshPublishBindsForVolume(stagingPath, "")
+}
+
+func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string) error {
+	stagingPath = filepath.Clean(stagingPath)
+	stagingComparePath := canonicalMountPath(stagingPath)
+	stagingVolumeNames := stagingVolumeNameSet(stagingPath, volumeID)
+
+	sourceRefs, err := ns.mounter.GetMountRefs(stagingPath)
+	if err != nil {
+		return fmt.Errorf("get mount refs for %s: %w", stagingPath, err)
+	}
+	refTargets := make(map[string]struct{}, len(sourceRefs))
+	for _, ref := range sourceRefs {
+		refTargets[canonicalMountPath(ref)] = struct{}{}
+	}
+
+	mounts, err := ns.mounter.List()
+	if err != nil {
+		return fmt.Errorf("list mounts: %w", err)
+	}
+	mountByPath := make(map[string]struct {
+		source  string
+		options []string
+	}, len(mounts))
+	for _, mp := range mounts {
+		mountByPath[canonicalMountPath(mp.Path)] = struct {
+			source  string
+			options []string
+		}{
+			source:  canonicalMountPath(mp.Device),
+			options: append([]string(nil), mp.Opts...),
+		}
+	}
+	stagingMount, stagingMounted := mountByPath[stagingComparePath]
+
+	err = filepath.WalkDir(kubeletPodsDir, func(path string, d os.DirEntry, walkErr error) error {
+		corruptedByWalk := false
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return nil
+			}
+			if filepath.Base(path) != "mount" {
+				klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
+				return nil
+			}
+			corruptedByWalk = mount.IsCorruptedMnt(walkErr)
+			if !corruptedByWalk {
+				klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
+				return nil
+			}
+		}
+		if walkErr == nil && (!d.IsDir() || filepath.Base(path) != "mount") {
+			return nil
+		}
+
+		_, volumeName, ok := parseCSIPublishMountPath(path)
+		if !ok {
+			return nil
+		}
+
+		target := filepath.Clean(path)
+		targetComparePath := canonicalMountPath(target)
+		mp, mounted := mountByPath[targetComparePath]
+		_, sourceRef := refTargets[targetComparePath]
+		_, sameVolume := stagingVolumeNames[volumeName]
+		sourceMatches := sourceRef || (mounted && mp.source == stagingComparePath) ||
+			(sameVolume && mounted && stagingMounted && mp.source == stagingMount.source)
+		corrupted, _ := IsMountPathCorrupted(target)
+		corrupted = corrupted || corruptedByWalk
+		if !sourceMatches && !(corrupted && sameVolume) {
+			return nil
+		}
+
+		readOnly := mountOptionsReadOnly(mp.options)
+		if err := ns.unbindPublish(target); err != nil {
+			return fmt.Errorf("unbind publish %s: %w", target, err)
+		}
+		if err := os.MkdirAll(target, 0755); err != nil {
+			return fmt.Errorf("recreate publish target %s: %w", target, err)
+		}
+		if err := ns.bindPublish(stagingPath, target, readOnly); err != nil {
+			return fmt.Errorf("bind publish %s from %s: %w", target, stagingPath, err)
+		}
+		klog.Infof("Refreshed publish bind %s from staging path %s", target, stagingPath)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walk kubelet publish paths: %w", err)
+	}
+	return nil
+}
+
+func stagingVolumeNameSet(stagingPath, volumeID string) map[string]struct{} {
+	names := map[string]struct{}{}
+	for _, name := range []string{extractVolumeID(stagingPath), volumeID, strings.TrimPrefix(volumeID[strings.LastIndex(volumeID, "#")+1:], "#")} {
+		if name != "" && name != unknownValue {
+			names[name] = struct{}{}
+		}
+	}
+	return names
+}
+
+func canonicalMountPath(path string) string {
+	clean := filepath.Clean(path)
+	realPath, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return clean
+	}
+	return filepath.Clean(realPath)
+}
+
+func parseCSIPublishMountPath(path string) (podUID, volumeName string, ok bool) {
+	parts := strings.Split(filepath.Clean(path), string(os.PathSeparator))
+	podsIdx := -1
+	csiIdx := -1
+	for i, part := range parts {
+		switch part {
+		case "pods":
+			podsIdx = i
+		case "kubernetes.io~csi":
+			csiIdx = i
+		}
+	}
+	if podsIdx < 0 || csiIdx < 0 || podsIdx+1 >= len(parts) || csiIdx+1 >= len(parts) {
+		return "", "", false
+	}
+	if parts[len(parts)-1] != "mount" {
+		return "", "", false
+	}
+	podUID = parts[podsIdx+1]
+	volumeName = parts[csiIdx+1]
+	return podUID, volumeName, podUID != "" && volumeName != ""
+}
+
+func mountOptionsReadOnly(options []string) bool {
+	for _, opt := range options {
+		if opt == "ro" || strings.HasPrefix(opt, "ro,") || strings.HasSuffix(opt, ",ro") || strings.Contains(opt, ",ro,") {
+			return true
+		}
+	}
+	return false
 }
