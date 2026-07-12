@@ -61,7 +61,9 @@ The optional **volume recovery operator** is a node-local DaemonSet that complem
 - Workloads **without** `mountPropagation: HostToContainer` cannot see a remounted kubelet path until the pod is recreated.
 - After CSI driver OOM/restart, app containers may still hold dead FUSE file descriptors even when the kubelet mount is healthy.
 
-The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node, reuses `IsMountPathHealthy` from the driver, and deletes affected workload pods so controllers recreate them.
+The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node, reuses `IsMountPathCorrupted` from the driver, and deletes affected workload pods so controllers recreate them.
+
+When Phase B remount keeps kubelet paths healthy, the operator also watches for **CSI node pod restarts** on the same node and restarts workload pods that use rclone volumes. Container bind mounts cannot be refreshed in-place without `mountPropagation` or a pod restart.
 
 ### Safety rails
 

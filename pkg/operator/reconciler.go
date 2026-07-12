@@ -123,6 +123,66 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 	return nil
 }
 
+// ReconcileWorkloadPodsAfterCSIRestart restarts workload pods using rclone volumes after a CSI node restart.
+// Kubelet publish paths may already be healthy (Phase B remount) while container bind mounts stay stale.
+func (r *Reconciler) ReconcileWorkloadPodsAfterCSIRestart(ctx context.Context) error {
+	pods, err := r.client.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "spec.nodeName=" + r.nodeName,
+	})
+	if err != nil {
+		return fmt.Errorf("list pods on node %s: %w", r.nodeName, err)
+	}
+
+	now := time.Now()
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if ShouldSkipPod(pod) {
+			continue
+		}
+		if !podHasProvisionerVolume(ctx, r.client, pod, r.provisioner) {
+			continue
+		}
+		if IsRateLimited(pod, now, r.cooldown) {
+			klog.InfoS("rate limited CSI restart recovery", "pod", pod.Namespace+"/"+pod.Name)
+			continue
+		}
+		if err := r.restartPod(ctx, pod, now); err != nil {
+			klog.ErrorS(err, "failed to restart pod after CSI node restart", "pod", pod.Namespace+"/"+pod.Name)
+			continue
+		}
+		klog.InfoS("restarted pod after CSI node restart", "pod", pod.Namespace+"/"+pod.Name)
+	}
+	return nil
+}
+
+func podHasProvisionerVolume(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, provisioner string) bool {
+	for _, vol := range pod.Spec.Volumes {
+		if vol.CSI != nil && vol.CSI.Driver == provisioner {
+			return true
+		}
+		if vol.PersistentVolumeClaim == nil {
+			continue
+		}
+		pvc, err := client.CoreV1().PersistentVolumeClaims(pod.Namespace).Get(ctx, vol.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+		if err != nil {
+			klog.V(4).InfoS("failed to get PVC for volume", "pvc", vol.PersistentVolumeClaim.ClaimName, "err", err)
+			continue
+		}
+		if pvc.Spec.VolumeName == "" {
+			continue
+		}
+		pv, err := client.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+		if err != nil {
+			klog.V(4).InfoS("failed to get PV for PVC", "pv", pvc.Spec.VolumeName, "err", err)
+			continue
+		}
+		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == provisioner {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.Time) error {
 	pod = pod.DeepCopy()
 	if pod.Annotations == nil {

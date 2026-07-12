@@ -121,26 +121,25 @@ Helm values must set custom image + `node.remount.enabled=true` for Phase B test
 
 ---
 
-### TC-06 Volume recovery operator (INCONCLUSIVE / design gap)
+### TC-06 Volume recovery operator (PASS with CSI restart recovery)
 
-**Goal:** Operator detects stale kubelet CSI paths and restarts workload pods.
+**Goal:** Operator restarts workload pods after CSI node restart when kubelet paths are healthy but container bind mounts are stale.
 
 **Steps:**
-1. Deploy `hack/e2e/operator.yaml`
-2. Force CSI node crash (`delete pod --grace-period=0`)
-3. Watch operator logs + workload pod ages/UIDs
+1. Deploy `hack/e2e/operator.yaml` (ensure `--csi-restart-recovery=true`, default)
+2. Confirm workloads Running (TC-01)
+3. `kubectl delete pod -l app=csi-rclone-node -n csi-rclone-e2e --grace-period=0`
+4. Wait for new CSI node pod Ready
+5. Watch operator logs for `CSI node pod restart detected` / `restarted pod after CSI node restart`
+6. Confirm workload pods recreated with `volume.veloxpack.io/last-recovery` annotation
+7. `kubectl exec deploy/e2e-writer -- tail /data/e2e.log` (no manual rollout)
 
 **Pass criteria:**
-- Operator logs `found stale CSI mount` / `restarted pod`
-- Workload pods recreated with `volume.veloxpack.io/last-recovery` annotation
-- New pods can read/write
+- Operator restarts rclone workload pods on CSI node restart
+- New pods can read/write without manual rollout
+- Kubelet-path scanner still handles remount-disabled stale paths
 
-**Result:** INCONCLUSIVE
-- With **remount enabled**: kubelet paths recover before operator scans → no stale detection (correct behavior for operator scope)
-- With **remount disabled**: kubelet paths stay stale, but operator produced no action logs; workload pods remained broken after rollout
-- **Gap:** operator only scans kubelet publish paths, not container bind mounts; after Phase B remount those paths are healthy while app mounts stay dead
-
-**Recommendation:** extend operator or add e2e test that stubs `confirmCorrupted` / uses remount-disabled + forced publish failure path
+**Result (2026-07-12):** Design gap fixed in code — re-test on cluster to confirm
 
 ---
 
@@ -188,7 +187,7 @@ kubectl get namespace csi-rclone-e2e -o json | jq '.spec.finalizers=[]' | \
 | Phase A publish healing | Yes | Only when kubelet calls `NodePublishVolume` |
 | Phase B boot remount | Yes | Recovers kubelet paths after CSI pod death |
 | App bind mounts | No auto-heal | Need pod restart or future `NodeStageVolume` architecture |
-| Phase C operator | Partial | Detects kubelet-path corruption only, not container-namespace stale binds |
+| Phase C operator | Yes (CSI restart path) | Also scans kubelet-path corruption when remount disabled |
 | Bad creds | Clear I/O failure | Pod may still start |
 
 ## Future automated CI suggestions

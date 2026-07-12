@@ -33,10 +33,12 @@ import (
 )
 
 var (
-	kubeletDir    = flag.String("kubelet-dir", "/var/lib/kubelet", "Kubelet state directory")
-	provisioner   = flag.String("provisioner", rclone.DefaultDriverName, "CSI driver name to recover")
-	scanInterval  = flag.Duration("scan-interval", 60*time.Second, "Interval between stale mount scans")
-	nodeName      = flag.String("node-name", "", "Kubernetes node name (defaults to NODE_NAME env)")
+	kubeletDir         = flag.String("kubelet-dir", "/var/lib/kubelet", "Kubelet state directory")
+	provisioner        = flag.String("provisioner", rclone.DefaultDriverName, "CSI driver name to recover")
+	scanInterval       = flag.Duration("scan-interval", 60*time.Second, "Interval between stale mount scans")
+	nodeName           = flag.String("node-name", "", "Kubernetes node name (defaults to NODE_NAME env)")
+	csiNodeLabel       = flag.String("csi-node-label", operator.DefaultCSINodeLabelSelector(), "Label selector for CSI node pods")
+	csiRestartRecovery = flag.Bool("csi-restart-recovery", true, "Restart workload pods when the CSI node pod restarts")
 )
 
 func main() {
@@ -63,6 +65,7 @@ func main() {
 
 	mounter := mount.New("" /* mounterPath */)
 	reconciler := operator.NewReconciler(client, *nodeName, *provisioner)
+	csiTracker := operator.NewCSINodeTracker(client, *nodeName, *csiNodeLabel)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -71,12 +74,25 @@ func main() {
 		"node", *nodeName,
 		"kubeletDir", *kubeletDir,
 		"provisioner", *provisioner,
-		"scanInterval", *scanInterval)
+		"scanInterval", *scanInterval,
+		"csiNodeLabel", *csiNodeLabel,
+		"csiRestartRecovery", *csiRestartRecovery)
 
 	ticker := time.NewTicker(*scanInterval)
 	defer ticker.Stop()
 
 	runScan := func() {
+		if *csiRestartRecovery {
+			restarted, err := csiTracker.CheckRestarted(ctx)
+			if err != nil {
+				klog.ErrorS(err, "CSI node restart check failed")
+			} else if restarted {
+				if err := reconciler.ReconcileWorkloadPodsAfterCSIRestart(ctx); err != nil {
+					klog.ErrorS(err, "CSI restart workload recovery failed")
+				}
+			}
+		}
+
 		stale, err := operator.ScanStaleMounts(*kubeletDir, mounter)
 		if err != nil {
 			klog.ErrorS(err, "stale mount scan failed")
