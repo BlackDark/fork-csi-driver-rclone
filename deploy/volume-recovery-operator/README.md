@@ -26,17 +26,20 @@ DaemonSet args (see `daemonset.yaml`):
 | `--kubelet-dir` | `/var/lib/kubelet` | Kubelet state root |
 | `--provisioner` | `rclone.csi.veloxpack.io` | CSI driver to recover |
 | `--scan-interval` | `60s` | Scan loop interval |
+| `--csi-node-label` | `app=csi-rclone-node` | Label selector for CSI node pods |
+| `--csi-restart-recovery` | `true` | Restart rclone workload pods after CSI node restart |
 
 `NODE_NAME` is injected from the downward API (`spec.nodeName`).
 
 ## Behavior
 
-1. Walk `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount`
-2. Run the same health probe as the CSI driver (`IsMountPathHealthy`)
-3. Match mount pod UID to pods scheduled on this node
-4. Skip `kube-system`, pods named `*csi-rclone*`, and CSI DaemonSet pods
-5. Rate limit: at most one recovery delete per pod per hour (`volume.veloxpack.io/last-recovery` annotation)
-6. Delete the pod (grace period 0) so controllers recreate it with fresh mounts
+1. Watch local CSI node pod (`app=csi-rclone-node`); on restart, restart workload pods using rclone volumes on this node
+2. Walk `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount`
+3. Run the same health probe as the CSI driver (`IsMountPathCorrupted`)
+4. Match mount pod UID to pods scheduled on this node
+5. Skip `kube-system`, pods named `*csi-rclone*`, and CSI DaemonSet pods
+6. Rate limit: at most one recovery delete per pod per hour (`volume.veloxpack.io/last-recovery` annotation)
+7. Delete the pod (grace period 0) so controllers recreate it with fresh mounts
 
 ## Uninstall
 
