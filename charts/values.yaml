@@ -102,6 +102,10 @@ node:
   dnsPolicy: ClusterFirstWithHostNet  # available values: Default, ClusterFirstWithHostNet, ClusterFirst
   maxUnavailable: 1
   logLevel: 5
+  # Termination grace period for graceful shutdown and volume unmount
+  terminationGracePeriodSeconds: 120
+  remount:
+    enabled: false
   livenessProbe:
     healthPort: 29653
   affinity: {}
@@ -123,6 +127,8 @@ node:
         cpu: 10m
         memory: 20Mi
     rclone:
+      # Memory limit should exceed vfs-cache-max-size (see docs/mount-recovery.md).
+      # Example: vfs-cache-max-size=512M → use limits.memory >= 1Gi for headroom.
       limits:
         memory: 300Mi
       requests:
