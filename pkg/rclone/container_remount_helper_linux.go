@@ -21,6 +21,7 @@ package rclone
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -60,6 +61,9 @@ func runContainerMoveMount(args []string) error {
 }
 
 func runContainerRemountSetns(args []string) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	if len(args) != 3 {
 		return fmt.Errorf("%s: expected 3 args, got %d", containerRemountHelperCmd, len(args))
 	}
