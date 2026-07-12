@@ -832,10 +832,20 @@ func (ns *NodeServer) unmountVolume(mc *mountContext, targetPath string) error {
 	return err
 }
 
-// NodePublishVolume mounts the rclone volume using direct rclone library integration
+// NodePublishVolume publishes the volume directly or from a staged mount.
 //
 //nolint:lll
 func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	if ns.Driver == nil || !ns.Driver.staging {
+		return ns.nodePublishVolumeDirect(ctx, req)
+	}
+	return ns.nodePublishVolumeStaged(ctx, req)
+}
+
+// nodePublishVolumeDirect mounts the rclone volume using direct rclone library integration.
+//
+//nolint:lll
+func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	// Validate request
 	if err := validatePublishVolumeRequest(req); err != nil {
 		return nil, err
@@ -967,6 +977,47 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
+func (ns *NodeServer) nodePublishVolumeStaged(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	if err := validatePublishVolumeRequest(req); err != nil {
+		return nil, err
+	}
+
+	volumeID := req.GetVolumeId()
+	targetPath := req.GetTargetPath()
+	lockKey := fmt.Sprintf("publish-%s-%s", volumeID, targetPath)
+	release, err := ns.acquireVolumeLock(lockKey, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	stagingPath := ns.getStagingPathForPublish(ctx, volumeID)
+	healthy, _ := IsMountPathHealthy(stagingPath, ns.mounter)
+	if ns.getStagedVolume(volumeID) == nil || !healthy {
+		if !healthy {
+			ns.deleteStagedVolume(volumeID)
+		}
+		if err := ns.rebuildOrRestage(ctx, req, stagingPath); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := ns.prepareTargetDirectory(targetPath, volumeID); err != nil {
+		if errors.Is(err, errMountAlreadyHealthy) {
+			klog.V(2).Infof("Volume %s already published at %s", volumeID, targetPath)
+			return &csi.NodePublishVolumeResponse{}, nil
+		}
+		return nil, err
+	}
+
+	if err := ns.bindPublish(stagingPath, targetPath, req.GetReadonly()); err != nil {
+		return nil, err
+	}
+
+	klog.V(2).Infof("Successfully bind-published volume %s from %s to %s", volumeID, stagingPath, targetPath)
+	return &csi.NodePublishVolumeResponse{}, nil
+}
+
 // NodeUnpublishVolume unmounts the rclone volume using direct stats access
 //
 //nolint:lll
@@ -988,6 +1039,14 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	defer release()
 
 	klog.V(2).Infof("NodeUnpublishVolume: unmounting volume %s from %s", volumeID, targetPath)
+
+	if ns.Driver != nil && ns.Driver.staging {
+		if err := ns.unbindPublish(targetPath); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to unmount target %q: %v", targetPath, err)
+		}
+		klog.V(2).Infof("Successfully unpublished bind mount for volume %s from %s", volumeID, targetPath)
+		return &csi.NodeUnpublishVolumeResponse{}, nil
+	}
 
 	// Get mount context and unmount
 	mc := ns.getMountContext(targetPath)
@@ -1110,8 +1169,12 @@ func (ns *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVo
 		})
 	}
 
-	// Check mount health
-	healthy, healthMessage := ns.isMountHealthy(volumePath)
+	// Check staging health for bind-published volumes; usage still comes from the requested path.
+	healthPath := volumePath
+	if ns.Driver != nil && ns.Driver.staging && req.GetVolumeId() != "" {
+		healthPath = ns.getStagingPathForPublish(ctx, req.GetVolumeId())
+	}
+	healthy, healthMessage := ns.isMountHealthy(healthPath)
 	volumeCondition := &csi.VolumeCondition{
 		Abnormal: !healthy,
 		Message:  healthMessage,

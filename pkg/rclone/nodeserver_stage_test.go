@@ -29,12 +29,34 @@ import (
 	mount "k8s.io/mount-utils"
 )
 
-func newTestNodeServerWithStaging(t *testing.T) (*NodeServer, *mount.FakeMounter) {
+type recordedMount struct {
+	source  string
+	target  string
+	fstype  string
+	options []string
+}
+
+type recordingMounter struct {
+	*mount.FakeMounter
+	mounts []recordedMount
+}
+
+func (rm *recordingMounter) Mount(source, target, fstype string, options []string) error {
+	rm.mounts = append(rm.mounts, recordedMount{
+		source:  source,
+		target:  target,
+		fstype:  fstype,
+		options: append([]string(nil), options...),
+	})
+	return rm.FakeMounter.Mount(source, target, fstype, options)
+}
+
+func newTestNodeServerWithStaging(t *testing.T) (*NodeServer, *recordingMounter) {
 	t.Helper()
 
 	d := NewEmptyDriver("")
 	d.staging = true
-	fm := mount.NewFakeMounter(nil)
+	fm := &recordingMounter{FakeMounter: mount.NewFakeMounter(nil)}
 	ns := &NodeServer{
 		Driver:  d,
 		mounter: fm,
@@ -175,4 +197,34 @@ func TestNodeStageVolumeRemountsAfterUnhealthyCachedStage(t *testing.T) {
 	assert.True(t, mountCalled)
 	assert.NotNil(t, ns.getStagedVolume("vol-unhealthy"))
 	assert.NotNil(t, ns.getMountContext(stagingPath))
+}
+
+func TestNodePublishVolumeBindFromStaging(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	stagingPath := t.TempDir()
+	targetPath := t.TempDir()
+
+	_, err := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "vol-bind",
+		StagingTargetPath: stagingPath,
+		VolumeCapability:  testMountCapability(),
+		Secrets:           testSecrets(),
+	})
+	require.NoError(t, err)
+
+	_, err = ns.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:         "vol-bind",
+		TargetPath:       targetPath,
+		VolumeCapability: testMountCapability(),
+		Secrets:          testSecrets(),
+	})
+	require.NoError(t, err)
+
+	require.Len(t, fm.mounts, 2)
+	assert.Equal(t, recordedMount{
+		source:  stagingPath,
+		target:  targetPath,
+		fstype:  "",
+		options: []string{"bind"},
+	}, fm.mounts[1])
 }
