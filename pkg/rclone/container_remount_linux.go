@@ -210,7 +210,7 @@ func remountViaNsenterMoveMount(pid int, mountPoint, stagingPath string, readOnl
 		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
-	if err := clearCloseOnExec(int(treeFD)); err != nil {
+	if err := clearCloseOnExec(int(treeFile.Fd())); err != nil {
 		_ = treeFile.Close()
 		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
 	}
@@ -246,7 +246,7 @@ func remountViaSetnsHelper(pid int, mountPoint, stagingPath string, readOnly boo
 		_ = unix.Close(treeFD)
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
-	if err := clearCloseOnExec(int(treeFD)); err != nil {
+	if err := clearCloseOnExec(int(treeFile.Fd())); err != nil {
 		_ = treeFile.Close()
 		return fmt.Errorf("clear CLOEXEC on tree fd: %w", err)
 	}
