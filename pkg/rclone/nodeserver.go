@@ -337,6 +337,13 @@ func (ns *NodeServer) forceCleanupMount(targetPath string) error {
 	return mount.CleanupMountPoint(targetPath, ns.mounter, extensiveMountPointCheck)
 }
 
+func (ns *NodeServer) publishVolumeLockKey(volumeID, targetPath string) string {
+	if ns.Driver != nil && ns.Driver.staging {
+		return fmt.Sprintf("publish-%s-%s", volumeID, targetPath)
+	}
+	return fmt.Sprintf("%s-%s", volumeID, targetPath)
+}
+
 // acquireVolumeLock retries TryAcquire before returning Aborted for overlapping kubelet calls.
 func (ns *NodeServer) acquireVolumeLock(lockKey, volumeID string) (func(), error) {
 	for attempt := 0; attempt < volumeLockMaxRetries; attempt++ {
@@ -856,7 +863,7 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 	mountCap := req.GetVolumeCapability().GetMount()
 
 	// Acquire lock for this volume operation
-	lockKey := fmt.Sprintf("%s-%s", volumeID, targetPath)
+	lockKey := ns.publishVolumeLockKey(volumeID, targetPath)
 	release, err := ns.acquireVolumeLock(lockKey, volumeID)
 	if err != nil {
 		return nil, err
@@ -984,7 +991,7 @@ func (ns *NodeServer) nodePublishVolumeStaged(ctx context.Context, req *csi.Node
 
 	volumeID := req.GetVolumeId()
 	targetPath := req.GetTargetPath()
-	lockKey := fmt.Sprintf("publish-%s-%s", volumeID, targetPath)
+	lockKey := ns.publishVolumeLockKey(volumeID, targetPath)
 	release, err := ns.acquireVolumeLock(lockKey, volumeID)
 	if err != nil {
 		return nil, err
@@ -997,9 +1004,16 @@ func (ns *NodeServer) nodePublishVolumeStaged(ctx context.Context, req *csi.Node
 		if !healthy {
 			ns.deleteStagedVolume(volumeID)
 		}
-		if err := ns.rebuildOrRestage(ctx, req, stagingPath); err != nil {
+		stageLockKey := fmt.Sprintf("stage-%s", volumeID)
+		stageRelease, err := ns.acquireVolumeLock(stageLockKey, volumeID)
+		if err != nil {
 			return nil, err
 		}
+		if err := ns.rebuildOrRestage(ctx, req, stagingPath); err != nil {
+			stageRelease()
+			return nil, err
+		}
+		stageRelease()
 	}
 
 	if err := ns.prepareTargetDirectory(targetPath, volumeID); err != nil {
@@ -1031,7 +1045,7 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	targetPath := req.GetTargetPath()
 
 	// Acquire lock for this volume operation
-	lockKey := fmt.Sprintf("publish-%s-%s", volumeID, targetPath)
+	lockKey := ns.publishVolumeLockKey(volumeID, targetPath)
 	release, err := ns.acquireVolumeLock(lockKey, volumeID)
 	if err != nil {
 		return nil, err

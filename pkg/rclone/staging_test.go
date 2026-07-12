@@ -96,6 +96,29 @@ func TestFindStagingMountStateUsesStagingPath(t *testing.T) {
 	assert.Equal(t, stagingPath, ns.getStagingPathForPublish(context.Background(), "vol-stage"))
 }
 
+func TestGetDefaultStagingPathUsesDriverName(t *testing.T) {
+	volumeID := "vol-driver-name"
+
+	ns := &NodeServer{Driver: NewEmptyDriver("")}
+	assert.Equal(t, filepath.Join(
+		"/var/lib/kubelet/plugins/kubernetes.io/csi",
+		DefaultDriverName,
+		"pv",
+		volumeID,
+		"globalmount",
+	), ns.getDefaultStagingPath(volumeID))
+
+	customDriver := "custom.csi.example.io"
+	ns.Driver = &Driver{name: customDriver, volumeLocks: NewVolumeLocks()}
+	assert.Equal(t, filepath.Join(
+		"/var/lib/kubelet/plugins/kubernetes.io/csi",
+		customDriver,
+		"pv",
+		volumeID,
+		"globalmount",
+	), ns.getDefaultStagingPath(volumeID))
+}
+
 func TestRefreshPublishBindsRebindsMountFromStagingPath(t *testing.T) {
 	ns, fm := newTestNodeServerWithStaging(t)
 	kubeletDir := t.TempDir()
