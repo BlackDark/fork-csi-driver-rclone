@@ -21,11 +21,13 @@ package rclone
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
@@ -204,19 +206,16 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
 
-	helper, err := containerRemountHelperExecutable()
+	helper, err := os.Executable()
 	if err != nil {
 		_ = treeFile.Close()
 		return fmt.Errorf("resolve helper binary: %w", err)
 	}
 
 	cmd := exec.Command(
-		"nsenter",
-		"-t", strconv.Itoa(pid),
-		"-m",
-		"--",
 		helper,
-		containerMoveMountHelperCmd,
+		containerRemountHelperCmd,
+		strconv.Itoa(pid),
 		mountPoint,
 		strconv.FormatBool(readOnly),
 	)
@@ -230,13 +229,70 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 	return nil
 }
 
+const hostRemountHelperDir = "/var/lib/kubelet/plugins/kubernetes.io/csi/rclone.csi.veloxpack.io/remount-helper"
+
+var (
+	hostRemountHelperOnce sync.Once
+	hostRemountHelperPath string
+	hostRemountHelperErr  error
+)
+
 func containerRemountHelperExecutable() (string, error) {
-	exe, err := os.Executable()
+	hostPath, err := ensureHostRemountHelper()
 	if err != nil {
 		return "", err
 	}
-	// Workload mount namespaces cannot see /rcloneplugin; reach CSI rootfs via hostPID proc.
-	return fmt.Sprintf("/proc/%d/root%s", os.Getpid(), exe), nil
+	// Reach host-root binary from workload mnt ns via init proc (requires hostPID).
+	return "/proc/1/root" + hostPath, nil
+}
+
+func ensureHostRemountHelper() (string, error) {
+	hostRemountHelperOnce.Do(func() {
+		hostPath := filepath.Join(hostRemountHelperDir, "rcloneplugin")
+		exe, err := os.Executable()
+		if err != nil {
+			hostRemountHelperErr = fmt.Errorf("resolve executable: %w", err)
+			return
+		}
+		if err := os.MkdirAll(hostRemountHelperDir, 0o755); err != nil {
+			hostRemountHelperErr = fmt.Errorf("mkdir %s: %w", hostRemountHelperDir, err)
+			return
+		}
+		if _, err := os.Stat(hostPath); err != nil {
+			if !os.IsNotExist(err) {
+				hostRemountHelperErr = fmt.Errorf("stat %s: %w", hostPath, err)
+				return
+			}
+			if err := installHostRemountHelper(exe, hostPath); err != nil {
+				hostRemountHelperErr = err
+				return
+			}
+		}
+		hostRemountHelperPath = hostPath
+	})
+	return hostRemountHelperPath, hostRemountHelperErr
+}
+
+func installHostRemountHelper(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o555)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copy helper to %s: %w", dst, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	klog.Infof("Installed container remount helper at %s", dst)
+	return nil
 }
 
 func remountViaNsenterBind(pid int, mountPoint, stagingPath string, readOnly bool) error {
