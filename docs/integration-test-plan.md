@@ -163,6 +163,46 @@ Helm values must set custom image + `node.remount.enabled=true` for Phase B test
 
 ---
 
+### TC-08 Staging + CSI restart without workload restart (FAIL)
+
+**Goal:** Validate `NodeStageVolume` staging path plus `NodePublishVolume` bind mounts recover workload I/O after CSI node restart without restarting workload pods.
+
+**Deploy:**
+```bash
+docker buildx build --platform linux/amd64 \
+  -t ttl.sh/csi-rclone-staging-20260712091846:8h --push .
+kubectl apply -f hack/e2e/namespace.yaml
+kubectl apply -f hack/e2e/minio.yaml
+helm upgrade --install csi-rclone-e2e ./charts -n csi-rclone-e2e \
+  -f hack/e2e/helm-values.yaml \
+  -f hack/e2e/helm-values-staging.yaml \
+  --set image.rclone.repository=ttl.sh/csi-rclone-staging-20260712091846 \
+  --set image.rclone.tag=8h --wait --timeout 120s
+kubectl apply -f hack/e2e/workloads.yaml
+```
+
+`hack/e2e/helm-values-staging.yaml` only enables staging/remount; the base e2e values were also required to create `storageclass/rclone-e2e`.
+
+**Result (2026-07-12):** FAIL on `informaten`
+
+| Check | Result | Evidence |
+|-------|--------|----------|
+| CSI image | PASS | Built/pushed `linux/amd64` image `ttl.sh/csi-rclone-staging-20260712091846:8h` |
+| Stack ready | PASS | `e2e-writer` and `e2e-writer-propagated` Running on `debian-01`; PVCs Bound |
+| Staging calls | PASS | CSI node logs showed `NodeStageVolume`, `Successfully staged volume`, and bind publish from `.../globalmount` |
+| Baseline `e2e-writer` tail | PASS | `kubectl exec deploy/e2e-writer -- tail /data/e2e.log` returned log timestamp |
+| Baseline `e2e-writer-propagated` tail | PASS | `kubectl exec deploy/e2e-writer-propagated -- tail /data/e2e.log` returned log timestamp |
+| CSI node restart | PASS | Force-deleted `csi-rclone-node-rssc7`; new `csi-rclone-node-ckht7` Ready; workload pod UIDs unchanged |
+| Post-restart `e2e-writer` tail | FAIL | `Transport endpoint is not connected` immediately and after 30s |
+| Post-restart `e2e-writer-propagated` tail | FAIL | `Transport endpoint is not connected` immediately and after 30s |
+
+**Notes:**
+- New CSI node logs reported `Remounting 3 persisted mount states` and `Successfully remounted volume` for both writer staging paths.
+- Host debug after restart showed `globalmount` directories existed, but `mountpoint -q` did not report them as active mountpoints; workload publish paths were still stale.
+- TC-08 success criterion was not met: `e2e-writer-propagated` did not survive CSI restart without workload restart.
+
+---
+
 ## Cleanup
 
 Fast teardown (no long `--wait`; handles stuck Terminating PVCs/PVs and orphan namespaces):
