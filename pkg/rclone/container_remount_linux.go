@@ -204,16 +204,19 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 		return fmt.Errorf("wrap open_tree fd for %s", stagingPath)
 	}
 
-	helper, err := os.Executable()
+	helper, err := containerRemountHelperExecutable()
 	if err != nil {
 		_ = treeFile.Close()
 		return fmt.Errorf("resolve helper binary: %w", err)
 	}
 
 	cmd := exec.Command(
+		"nsenter",
+		"-t", strconv.Itoa(pid),
+		"-m",
+		"--",
 		helper,
-		containerRemountHelperCmd,
-		strconv.Itoa(pid),
+		containerMoveMountHelperCmd,
 		mountPoint,
 		strconv.FormatBool(readOnly),
 	)
@@ -225,6 +228,15 @@ func remountViaSetns(pid int, mountPoint, stagingPath string, readOnly bool) err
 	}
 	_ = treeFile.Close()
 	return nil
+}
+
+func containerRemountHelperExecutable() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	// Workload mount namespaces cannot see /rcloneplugin; reach CSI rootfs via hostPID proc.
+	return fmt.Sprintf("/proc/%d/root%s", os.Getpid(), exe), nil
 }
 
 func remountViaNsenterBind(pid int, mountPoint, stagingPath string, readOnly bool) error {
