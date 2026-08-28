@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build on the builder host platform; cross-compile with GOARCH=$TARGETARCH.
-FROM --platform=$BUILDPLATFORM golang:1.26.2 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.5 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG RCLONE_BACKEND_MODE=all
@@ -54,7 +54,7 @@ RUN RCLONE_VERSION=$(grep "github.com/rclone/rclone" go.mod | awk '{print $2}' |
     cmd/rcloneplugin/main.go
 
 # Runtime image for the target platform only (binary copied from builder).
-FROM --platform=$TARGETPLATFORM registry.k8s.io/build-image/debian-base:bookworm-v1.0.7
+FROM --platform=$TARGETPLATFORM registry.k8s.io/build-image/debian-base:bookworm-v1.0.8
 WORKDIR /
 
 # Install required dependencies

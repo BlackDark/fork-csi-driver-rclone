@@ -103,10 +103,50 @@ When Phase B remount keeps kubelet paths healthy, the operator also watches for 
 
 ### Deploy
 
-See [deploy/volume-recovery-operator/README.md](../deploy/volume-recovery-operator/README.md).
+Helm (preferred):
+
+```yaml
+volumeRecoveryOperator:
+  enabled: true
+```
+
+Or apply the kustomize manifests:
 
 ```bash
 kubectl apply -k deploy/volume-recovery-operator/
+```
+
+### Optional: Reloader instead of the operator
+
+If you already run [stakater/Reloader](https://github.com/stakater/Reloader) and prefer rolling Deployments/StatefulSets over force-deleting pods, you can approximate the same **pod recreate → remount** outcome without the volume recovery operator.
+
+**Prefer the volume recovery operator.** Reloader does not scan mount health, restarts all annotated replicas (all nodes), requires same-namespace ConfigMap `data` changes, and silently does nothing if annotations or Reloader are missing. Do **not** run Reloader recovery signaling and the operator together — double restarts.
+
+Per app namespace:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rclone-csi-recovery
+  namespace: media
+data:
+  epoch: "0"
+```
+
+Annotate each rclone CSI consumer Deployment/StatefulSet:
+
+```yaml
+metadata:
+  annotations:
+    configmap.reloader.stakater.com/reload: "rclone-csi-recovery"
+```
+
+After CSI remount (or when workloads hit `Transport endpoint is not connected`), bump ConfigMap **data** (annotation-only bumps are ignored by Reloader):
+
+```bash
+kubectl -n media patch configmap rclone-csi-recovery \
+  --type merge -p "{\"data\":{\"epoch\":\"$(date -u +%Y%m%dT%H%M%SZ)\"}}"
 ```
 
 ### References

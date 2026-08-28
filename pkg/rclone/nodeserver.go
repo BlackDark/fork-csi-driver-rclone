@@ -58,6 +58,16 @@ const (
 const (
 	volumeLockMaxRetries = 5
 	volumeLockRetryDelay = 200 * time.Millisecond
+
+	// defaultMountTimeout bounds how long NodePublishVolume waits for a mount to
+	// complete before returning and reaping the mount in the background. It is kept
+	// below kubelet's ~120s NodePublishVolume timeout so the driver returns a clean,
+	// retriable error rather than being torn out of the RPC mid-mount.
+	defaultMountTimeout = 90 * time.Second
+
+	// gracefulUnmountTimeout bounds how long NodeUnpublishVolume waits for a graceful
+	// mountPoint.Unmount() before falling through to a forced cleanup.
+	gracefulUnmountTimeout = 30 * time.Second
 )
 
 // reservedParams contains parameter names that should not be passed to rclone backend
@@ -83,6 +93,15 @@ type mountFilesystemFn func(
 	string, string, []string, map[string]string,
 ) (*mountlib.MountPoint, context.Context, context.CancelFunc, error)
 
+// mountResult carries the outcome of an asynchronous createAndMountFilesystem call
+// back to the NodePublishVolume handler (or the orphan reaper).
+type mountResult struct {
+	mountPoint *mountlib.MountPoint
+	mountCtx   context.Context
+	cancel     context.CancelFunc
+	err        error
+}
+
 // NodeServer implements the CSI Node service
 type NodeServer struct {
 	Driver            *Driver
@@ -95,6 +114,14 @@ type NodeServer struct {
 	stagedVolumesMu   sync.RWMutex
 	configMu          sync.Mutex // Protects concurrent config operations
 	csi.UnimplementedNodeServer
+}
+
+// mountTimeout returns the configured mount timeout, falling back to defaultMountTimeout.
+func (ns *NodeServer) mountTimeout() time.Duration {
+	if ns.Driver != nil && ns.Driver.mountTimeout > 0 {
+		return ns.Driver.mountTimeout
+	}
+	return defaultMountTimeout
 }
 
 // getMountContext retrieves mount context for a given target path
@@ -293,15 +320,31 @@ func extractPublishParams(params map[string]string) (*publishVolumeParams, error
 }
 
 // prepareTargetDirectory ensures the target directory exists and handles stale mounts.
+// A healthy accessible mount returns errMountAlreadyHealthy so callers can decide whether
+// to treat the publish as idempotent (when mountContext exists) or remount.
 func (ns *NodeServer) prepareTargetDirectory(targetPath string, volumeID string) error {
 	notMnt, err := ns.mounter.IsLikelyNotMountPoint(targetPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		switch {
+		case os.IsNotExist(err):
 			if err := os.MkdirAll(targetPath, 0755); err != nil {
 				return status.Error(codes.Internal, err.Error())
 			}
 			notMnt = true
-		} else {
+		case mount.IsCorruptedMnt(err):
+			// A stale FUSE mount is left behind after a driver/node-plugin restart
+			// ("transport endpoint is not connected"). Clean it up so we can remount.
+			klog.Warningf("Target path %s is a corrupted mount (err: %v), cleaning up before remount", targetPath, err)
+			if cerr := ns.forceCleanupMount(targetPath); cerr != nil {
+				klog.Errorf("Failed to unmount corrupted mount point %s: %v", targetPath, cerr)
+				return status.Errorf(codes.Internal, "corrupted mount could not be cleaned up: %v", cerr)
+			}
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				return status.Errorf(codes.Internal, "failed to recreate target directory after cleanup: %v", err)
+			}
+			klog.V(2).Infof("Successfully unmounted corrupted mount point %s, will remount", targetPath)
+			notMnt = true
+		default:
 			return status.Error(codes.Internal, err.Error())
 		}
 	}
@@ -340,7 +383,7 @@ func (ns *NodeServer) forceCleanupMount(targetPath string) error {
 	extensiveMountPointCheck := true
 	forceUnmounter, ok := ns.mounter.(mount.MounterForceUnmounter)
 	if ok {
-		return mount.CleanupMountWithForce(targetPath, forceUnmounter, extensiveMountPointCheck, 30*time.Second)
+		return mount.CleanupMountWithForce(targetPath, forceUnmounter, extensiveMountPointCheck, gracefulUnmountTimeout)
 	}
 	return mount.CleanupMountPoint(targetPath, ns.mounter, extensiveMountPointCheck)
 }
@@ -808,11 +851,20 @@ func (ns *NodeServer) unmountVolume(mc *mountContext, targetPath string) error {
 		// Wait for cache sync
 		waitForVFSCacheSync(mc)
 
-		// Unmount using mountPoint's built-in unmount
-		if err := mc.mountPoint.Unmount(); err != nil {
-			klog.Errorf("Failed to unmount via mountPoint: %v, will try standard unmount", err)
-		} else {
-			klog.V(4).Infof("Successfully unmounted via mountPoint.Unmount()")
+		// Unmount using mountPoint's built-in unmount. This call is unbounded and can
+		// wedge on in-flight S3 uploads, so bound it with a timeout and fall through to
+		// the forced CleanupMountWithForce below regardless (issue #86).
+		unmountDone := make(chan error, 1)
+		go func() { unmountDone <- mc.mountPoint.Unmount() }()
+		select {
+		case err := <-unmountDone:
+			if err != nil {
+				klog.Errorf("Failed to unmount via mountPoint: %v, will try standard unmount", err)
+			} else {
+				klog.V(4).Infof("Successfully unmounted via mountPoint.Unmount()")
+			}
+		case <-time.After(gracefulUnmountTimeout):
+			klog.Warningf("Graceful unmount of %s timed out after %s, will force unmount", targetPath, gracefulUnmountTimeout)
 		}
 
 		// Cancel context to stop VFS goroutines
@@ -837,8 +889,8 @@ func (ns *NodeServer) unmountVolume(mc *mountContext, targetPath string) error {
 	extensiveMountPointCheck := true
 	forceUnmounter, ok := ns.mounter.(mount.MounterForceUnmounter)
 	if ok {
-		klog.V(4).Infof("Using force unmount with 30s timeout")
-		err = mount.CleanupMountWithForce(targetPath, forceUnmounter, extensiveMountPointCheck, 30*time.Second)
+		klog.V(4).Infof("Using force unmount with %s timeout", gracefulUnmountTimeout)
+		err = mount.CleanupMountWithForce(targetPath, forceUnmounter, extensiveMountPointCheck, gracefulUnmountTimeout)
 	} else {
 		klog.V(4).Infof("Using standard cleanup")
 		err = mount.CleanupMountPoint(targetPath, ns.mounter, extensiveMountPointCheck)
@@ -872,11 +924,21 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 
 	// Acquire lock for this volume operation
 	lockKey := ns.publishVolumeLockKey(volumeID, targetPath)
-	release, err := ns.acquireVolumeLock(lockKey, volumeID)
+	_, err := ns.acquireVolumeLock(lockKey, volumeID)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+
+	// mountSuccess reports whether the mount completed and its context was stored.
+	// handOff reports that ownership of the in-flight mount, its loaded remotes, and
+	// the volume lock has been transferred to reapOrphanMount (on timeout/cancel). When
+	// handed off, neither the lock nor the remotes are released here — the reaper does it.
+	var mountSuccess, handOff bool
+	defer func() {
+		if !handOff {
+			ns.Driver.volumeLocks.Release(lockKey)
+		}
+	}()
 
 	// Get mount options from VolumeCapability (CSI standard)
 	readOnly := req.GetReadonly()
@@ -909,7 +971,8 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 		return nil, err
 	}
 
-	// Prepare target directory and check if already mounted
+	// Prepare target directory and check if already mounted. Healthy mounts without
+	// driver mountContext are cleaned up and remounted (recovery after plugin restart).
 	if err := ns.prepareTargetDirectory(targetPath, volumeID); err != nil {
 		if errors.Is(err, errMountAlreadyHealthy) {
 			if ns.getMountContext(targetPath) != nil {
@@ -945,51 +1008,133 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 	fsPath := buildFsPath(pvp.remoteName, pvp.remotePath)
 	klog.V(2).Infof("Using configData with %d remotes, resolving remote: %s", len(remotes), fsPath)
 
-	// Ensure cleanup on failure
-	var mountSuccess bool
+	// Ensure loaded remotes are cleaned up on failure. On hand-off (timeout/cancel),
+	// ownership transfers to the reaper, which frees them once the background mount ends.
 	defer func() {
-		if !mountSuccess {
+		if !mountSuccess && !handOff {
 			ns.cleanupConfigRemotes(remotes)
 		}
 	}()
 
-	// Create and mount the filesystem
-	mountPoint, ctx, cancel, err := ns.createAndMountFilesystem(fsPath, targetPath, mountOptions, pvp.params)
-	if err != nil {
-		return nil, err
+	// Run the mount in a background goroutine so we can bound how long we hold the
+	// volume lock. fs.NewFs and mountPoint.Mount() do S3 network I/O that can block
+	// indefinitely under throttling; without a bound the deferred lock release would
+	// never fire and every kubelet retry would get Aborted forever (issue #86).
+	// The channel is buffered (cap 1) so the goroutine's send never blocks even after
+	// this handler has returned on the timeout/cancel path.
+	resultCh := make(chan mountResult, 1)
+	go func() {
+		mp, mctx, cancel, err := ns.createAndMountFilesystem(fsPath, targetPath, mountOptions, pvp.params)
+		resultCh <- mountResult{mountPoint: mp, mountCtx: mctx, cancel: cancel, err: err}
+	}()
+
+	timer := time.NewTimer(ns.mountTimeout())
+	defer timer.Stop()
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			// Pre-timeout failure: mountSuccess stays false, so the deferred
+			// cleanupConfigRemotes frees the loaded remotes. createAndMountFilesystem
+			// already cancelled its context on every error path.
+			return nil, res.err
+		}
+
+		mountSuccess = true
+
+		// Store mount context
+		ns.setMountContext(targetPath, &mountContext{
+			mountPoint: res.mountPoint,
+			remoteName: pvp.remoteName,
+			remotes:    remotes,
+			cancel:     res.cancel,
+			ctx:        res.mountCtx,
+		})
+
+		if ns.mountStateManager != nil {
+			state := &MountState{
+				VolumeID:     volumeID,
+				TargetPath:   targetPath,
+				Timestamp:    time.Now(),
+				ConfigData:   pvp.configData,
+				RemoteName:   pvp.remoteName,
+				RemotePath:   pvp.remotePath,
+				RemoteType:   pvp.remoteType,
+				MountParams:  pvp.params,
+				MountOptions: mountOptions,
+				ReadOnly:     readOnly,
+			}
+			if err := ns.mountStateManager.SaveState(res.mountCtx, state); err != nil {
+				klog.Warningf("Failed to save mount state for volume %s: %v", volumeID, err)
+			}
+		}
+
+		klog.V(2).Infof("Successfully mounted volume %s to %s (remote: %s)", volumeID, targetPath, pvp.remoteName)
+		return &csi.NodePublishVolumeResponse{}, nil
+
+	case <-timer.C:
+		// Mount is taking too long. Hand off ownership of the in-flight mount, the
+		// loaded remotes, and the lock to the reaper so we return promptly and the
+		// lock is always eventually released. Return Aborted (retriable by kubelet).
+		handOff = true
+		klog.Warningf("NodePublishVolume for %s timed out after %s; reaping mount in background", targetPath, ns.mountTimeout())
+		go ns.reapOrphanMount(resultCh, targetPath, remotes, lockKey)
+		return nil, status.Errorf(codes.Aborted, volumeOperationAlreadyExistsFmt, volumeID)
+
+	case <-ctx.Done():
+		// kubelet cancelled/deadlined the RPC before our own timeout. Same hand-off.
+		handOff = true
+		klog.Warningf("NodePublishVolume for %s cancelled by caller (%v); reaping mount in background", targetPath, ctx.Err())
+		go ns.reapOrphanMount(resultCh, targetPath, remotes, lockKey)
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+}
+
+// reapOrphanMount takes ownership of an in-flight mount whose NodePublishVolume handler
+// already returned (on timeout or caller cancellation). It waits for the background mount
+// to finish, tears it down if it actually came up, frees the loaded remotes, and only then
+// releases the volume lock — so kubelet retries are refused until the orphan is fully gone
+// and can never observe the about-to-be-torn-down mount as "already mounted".
+//
+//nolint:lll
+func (ns *NodeServer) reapOrphanMount(resultCh <-chan mountResult, targetPath string, remotes []string, lockKey string) {
+	defer ns.Driver.volumeLocks.Release(lockKey)
+
+	res := <-resultCh // buffered send guarantees this arrives
+
+	if res.err != nil {
+		// createAndMountFilesystem cancelled its context on every error path, so nothing
+		// is mounted. Only the loaded remotes remain to be dropped.
+		klog.Warningf("Orphan mount for %s failed after hand-off: %v", targetPath, res.err)
+		ns.cleanupConfigRemotes(remotes)
+		return
 	}
 
-	mountSuccess = true
-
-	// Store mount context
-	ns.setMountContext(targetPath, &mountContext{
-		mountPoint: mountPoint,
-		remoteName: pvp.remoteName,
-		remotes:    remotes,
-		cancel:     cancel,
-		ctx:        ctx,
-	})
-
-	if ns.mountStateManager != nil {
-		state := &MountState{
-			VolumeID:     volumeID,
-			TargetPath:   targetPath,
-			Timestamp:    time.Now(),
-			ConfigData:   pvp.configData,
-			RemoteName:   pvp.remoteName,
-			RemotePath:   pvp.remotePath,
-			RemoteType:   pvp.remoteType,
-			MountParams:  pvp.params,
-			MountOptions: mountOptions,
-			ReadOnly:     readOnly,
-		}
-		if err := ns.mountStateManager.SaveState(ctx, state); err != nil {
-			klog.Warningf("Failed to save mount state for volume %s: %v", volumeID, err)
-		}
+	// The mount actually came up, but the caller was already told it failed. Tear it down
+	// completely so a subsequent retry starts clean. No VFS cache sync: the caller never
+	// saw this mount, there is nothing to flush, and syncing could block while we hold the lock.
+	klog.Warningf("Orphan mount for %s succeeded after hand-off; unmounting to avoid leak", targetPath)
+	if res.cancel != nil {
+		res.cancel() // stop VFS/mount goroutines and OAuth ctx before detaching
 	}
+	ns.forceUnmountBounded(targetPath)
+	ns.cleanupConfigRemotes(remotes)
+}
 
-	klog.V(2).Infof("Successfully mounted volume %s to %s (remote: %s)", volumeID, targetPath, pvp.remoteName)
-	return &csi.NodePublishVolumeResponse{}, nil
+// forceUnmountBounded detaches a mount at targetPath with a bounded timeout, preferring a
+// force unmount when the mounter supports it. It never calls the unbounded mountPoint.Unmount().
+func (ns *NodeServer) forceUnmountBounded(targetPath string) {
+	extensiveMountPointCheck := true
+	if forceUnmounter, ok := ns.mounter.(mount.MounterForceUnmounter); ok {
+		err := mount.CleanupMountWithForce(targetPath, forceUnmounter, extensiveMountPointCheck, gracefulUnmountTimeout)
+		if err != nil {
+			klog.Errorf("Orphan force-unmount of %s failed: %v", targetPath, err)
+		}
+		return
+	}
+	if err := mount.CleanupMountPoint(targetPath, ns.mounter, extensiveMountPointCheck); err != nil {
+		klog.Errorf("Orphan cleanup of %s failed: %v", targetPath, err)
+	}
 }
 
 func (ns *NodeServer) nodePublishVolumeStaged(
