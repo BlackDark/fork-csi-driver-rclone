@@ -1,16 +1,16 @@
 # Copyright 2025 Veloxpack.io
-FROM --platform=$BUILDPLATFORM golang:1.26.5 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd/volume-recovery-operator/ cmd/volume-recovery-operator/
 COPY pkg/ pkg/
-COPY vendor/ vendor/
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -mod vendor -trimpath \
+    go build -trimpath \
     -o volume-recovery-operator \
     cmd/volume-recovery-operator/main.go
 

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
@@ -364,12 +365,10 @@ func generateRecloneConfigFromParams(params rc.Params, remoteType, remoteName st
 //	merged := MergeCopy(m1, m2)
 //	// merged == map[string]int{"a":1, "b":3, "c":4}
 func mergeCopy[K comparable, V any](m1, m2 map[K]V) map[K]V {
-	merged := make(map[K]V)
-	for k, v := range m1 {
-		merged[k] = v
+	merged := maps.Clone(m1)
+	if merged == nil {
+		merged = make(map[K]V)
 	}
-	for k, v := range m2 {
-		merged[k] = v
-	}
+	maps.Copy(merged, m2)
 	return merged
 }

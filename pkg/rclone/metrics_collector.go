@@ -32,6 +32,9 @@ const (
 	unknownValue = "unknown"
 	trueValue    = "true"
 	falseValue   = "false"
+
+	labelVolumeID   = "volume_id"
+	labelRemoteName = "remote_name"
 )
 
 var (
@@ -107,62 +110,62 @@ func newMetricsCollector(ctx context.Context, nodeID, driverName, endpoint strin
 		vfsInUse: prometheus.NewDesc(
 			namespace+"vfs_file_handles_in_use",
 			"Number of file handles currently in use for this mount",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsMetadataCacheDirs: prometheus.NewDesc(
 			namespace+"vfs_metadata_cache_dirs_total",
 			"Number of directories in the VFS metadata cache",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsMetadataCacheFiles: prometheus.NewDesc(
 			namespace+"vfs_metadata_cache_files_total",
 			"Number of files in the VFS metadata cache",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsDiskCacheBytesUsed: prometheus.NewDesc(
 			namespace+"vfs_disk_cache_bytes_used",
 			"Bytes used by the VFS disk cache",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsDiskCacheFiles: prometheus.NewDesc(
 			namespace+"vfs_disk_cache_files_total",
 			"Number of files in the VFS disk cache",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsDiskCacheErrors: prometheus.NewDesc(
 			namespace+"vfs_disk_cache_errored_files_total",
 			"Number of files with errors in the VFS disk cache",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsUploadsInProgress: prometheus.NewDesc(
 			namespace+"vfs_uploads_in_progress_total",
 			"Number of uploads currently in progress",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsUploadsQueued: prometheus.NewDesc(
 			namespace+"vfs_uploads_queued_total",
 			"Number of uploads queued for processing",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		vfsDiskCacheOutOfSpace: prometheus.NewDesc(
 			namespace+"vfs_disk_cache_out_of_space",
 			"Whether the VFS disk cache is out of space (1=yes, 0=no)",
-			[]string{"volume_id", "remote_name"},
+			[]string{labelVolumeID, labelRemoteName},
 			nil,
 		),
 		mountHealthy: prometheus.NewDesc(
 			namespace+"mount_healthy",
 			"Mount health status with mount details (1=healthy, 0=unhealthy)",
 			[]string{
-				"volume_id", "pod_id", "target_path", "remote_name", "mount_type",
+				labelVolumeID, "pod_id", "target_path", labelRemoteName, "mount_type",
 				"device_name", "volume_name", "read_only", "mount_duration_seconds",
 			},
 			nil,

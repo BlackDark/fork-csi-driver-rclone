@@ -19,6 +19,7 @@ package rclone
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -256,10 +257,7 @@ func (d *Driver) ForceCacheSync(ctx context.Context) error {
 	}
 
 	d.ns.mu.RLock()
-	mountContexts := make(map[string]*mountContext, len(d.ns.mountContext))
-	for targetPath, mc := range d.ns.mountContext {
-		mountContexts[targetPath] = mc
-	}
+	mountContexts := maps.Clone(d.ns.mountContext)
 	d.ns.mu.RUnlock()
 
 	if len(mountContexts) == 0 {

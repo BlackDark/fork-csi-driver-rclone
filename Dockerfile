@@ -13,25 +13,23 @@
 # limitations under the License.
 
 # Build on the builder host platform; cross-compile with GOARCH=$TARGETARCH.
-FROM --platform=$BUILDPLATFORM golang:1.26.5 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG RCLONE_BACKEND_MODE=all
 
 WORKDIR /workspace
-# Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
 
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
-# RUN go mod download
+RUN go mod download
 
 # Copy the go source
 COPY cmd/rcloneplugin/ cmd/rcloneplugin
 COPY pkg/ pkg/
 COPY internal/ internal/
-COPY vendor/ vendor/
 
 # Extract version information for build flags
 ARG GIT_COMMIT
@@ -43,12 +41,11 @@ ARG DRIVER_VERSION=latest
 # was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
 # the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN RCLONE_VERSION=$(grep "github.com/rclone/rclone" go.mod | awk '{print $2}' | sed 's/v//') && \
+RUN RCLONE_VERSION=$(awk '/^[[:space:]]+github\.com\/rclone\/rclone v/{print $2; exit}' go.mod | sed 's/^v//') && \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -a \
     -ldflags="-X github.com/veloxpack/csi-driver-rclone/pkg/rclone.driverVersion=${DRIVER_VERSION} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.gitCommit=${GIT_COMMIT} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.buildDate=${BUILD_DATE} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.rcloneVersion=${RCLONE_VERSION} -s -w -extldflags '-static'" \
     -trimpath \
-    -mod vendor \
     -tags "netgo ${RCLONE_BACKEND_MODE}" \
     -o rcloneplugin \
     cmd/rcloneplugin/main.go

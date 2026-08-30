@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -508,11 +509,10 @@ func (ns *NodeServer) createAndMountFilesystem(
 	mountOptions []string,
 	params map[string]string,
 ) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
-	// Create a long-lived context for this mount with cancellation for cleanup
-	// This context will live for the entire duration of the mount, not just the RPC call.
-	// This is critical for OAuth token refresh which needs a valid context to make
-	// HTTP requests to the token endpoint throughout the mount's lifetime.
-	// Fixes: https://github.com/veloxpack/csi-driver-rclone/issues/54
+	// Per-mount context for config isolation and driver-owned cleanup.
+	// NewFs uses WithoutCancel below so OAuth/token refresh is not tied to
+	// this cancel (unpublish must not kill shared or reused Fs contexts).
+	// See https://github.com/veloxpack/csi-driver-rclone/issues/54
 	mountCtx, cancel := context.WithCancel(context.TODO())
 
 	// Create per-mount context with isolated config
@@ -538,7 +538,8 @@ func (ns *NodeServer) createAndMountFilesystem(
 		return nil, nil, nil, err
 	}
 
-	rcloneFs, err := fs.NewFs(mountCtx, fsPath)
+	// Config values come from mountCtx; lifetime of Fs/OAuth must outlive cancel.
+	rcloneFs, err := fs.NewFs(context.WithoutCancel(mountCtx), fsPath)
 	if err != nil {
 		cancel()
 		return nil, nil, nil, status.Errorf(codes.Internal, "failed to initialize filesystem: %v", err)
@@ -610,19 +611,17 @@ func handleRcloneDaemon(
 	}
 
 	// Wait for mountDaemon, if any...
-	killOnce := sync.Once{}
-	killDaemon := func(reason string) {
-		killOnce.Do(func() {
-			if err := mountDaemon.Signal(os.Interrupt); err != nil {
-				klog.Errorf("%s. Failed to terminate daemon pid %d: %v", reason, mountDaemon.Pid, err)
-				return
-			}
-			klog.V(2).Infof("%s. Terminating daemon pid %d", reason, mountDaemon.Pid)
-		})
-	}
+	killDaemon := sync.OnceFunc(func() {
+		if err := mountDaemon.Signal(os.Interrupt); err != nil {
+			klog.Errorf("Failed to terminate daemon pid %d: %v", mountDaemon.Pid, err)
+			return
+		}
+		klog.V(2).Infof("Terminating daemon pid %d", mountDaemon.Pid)
+	})
 
 	handle := atexit.Register(func() {
-		killDaemon("Got interrupt")
+		klog.V(2).Info("Got interrupt")
+		killDaemon()
 	})
 
 	defer atexit.Unregister(handle)
@@ -630,7 +629,8 @@ func handleRcloneDaemon(
 	if err := mountlib.WaitMountReady(
 		mountPoint.MountPoint, time.Duration(mountOpts.DaemonWait), mountDaemon,
 	); err != nil {
-		killDaemon("Daemon timed out")
+		klog.V(2).Info("Daemon timed out")
+		killDaemon()
 		cancel()
 		return status.Errorf(codes.Internal, "failed to wait for mount: %v", err)
 	}
@@ -1365,10 +1365,7 @@ func (ns *NodeServer) NodeExpandVolume(_ context.Context, _ *csi.NodeExpandVolum
 // UnmountAll unmounts all active volume mounts gracefully.
 func (ns *NodeServer) UnmountAll(ctx context.Context) error {
 	ns.mu.RLock()
-	mountContexts := make(map[string]*mountContext, len(ns.mountContext))
-	for targetPath, mc := range ns.mountContext {
-		mountContexts[targetPath] = mc
-	}
+	mountContexts := maps.Clone(ns.mountContext)
 	ns.mu.RUnlock()
 
 	if len(mountContexts) == 0 {
@@ -1382,15 +1379,14 @@ func (ns *NodeServer) UnmountAll(ctx context.Context) error {
 	errorChan := make(chan error, len(mountContexts))
 
 	for targetPath, mc := range mountContexts {
-		wg.Add(1)
-		go func(path string, mctx *mountContext) {
-			defer wg.Done()
+		path, mctx := targetPath, mc
+		wg.Go(func() {
 			if err := ns.unmountVolume(mctx, path); err != nil {
 				errorChan <- fmt.Errorf("failed to unmount %s: %w", path, err)
 				return
 			}
 			ns.deleteMountContext(path)
-		}(targetPath, mc)
+		})
 	}
 
 	done := make(chan struct{})
@@ -1402,14 +1398,11 @@ func (ns *NodeServer) UnmountAll(ctx context.Context) error {
 
 	select {
 	case <-done:
-		var errMsgs []string
+		var errs []error
 		for err := range errorChan {
-			errMsgs = append(errMsgs, err.Error())
+			errs = append(errs, err)
 		}
-		if len(errMsgs) > 0 {
-			return fmt.Errorf("unmount errors: %s", strings.Join(errMsgs, "; "))
-		}
-		return nil
+		return errors.Join(errs...)
 	case <-ctx.Done():
 		return fmt.Errorf("unmount timeout: %w", ctx.Err())
 	}

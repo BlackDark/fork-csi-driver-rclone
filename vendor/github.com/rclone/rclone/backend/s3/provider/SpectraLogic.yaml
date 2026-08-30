@@ -1,5 +1,0 @@
-name: SpectraLogic
-description: Spectra Logic Black Pearl
-endpoint: {}
-quirks:
-  force_path_style: true # path-style required
