@@ -422,4 +422,3 @@ func TestRewriteRemoteReferencesLongestFirst(t *testing.T) {
 	got := rewriteRemoteReferences("minio-sample:/path minio:", rename)
 	assert.Equal(t, "p-minio-sample:/path p-minio:", got)
 }
-

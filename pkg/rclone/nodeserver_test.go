@@ -536,11 +536,10 @@ func TestExtractPublishParamsRemotePrefixReserved(t *testing.T) {
 		paramRemote:       "rustfs",
 		paramConfigData:   "[rustfs]\ntype = s3\n",
 		paramRemotePrefix: "shared-ns",
-		"vfs-cache-mode":   "writes",
+		"vfs-cache-mode":  "writes",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "shared-ns", pvp.remotePrefix)
 	assert.NotContains(t, pvp.params, paramRemotePrefix)
 	assert.Equal(t, "writes", pvp.params["vfs_cache_mode"])
 }
-
