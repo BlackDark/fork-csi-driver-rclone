@@ -19,13 +19,16 @@ package rclone
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"maps"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-csi/csi-lib-utils/protosanitizer"
+	"github.com/rclone/rclone/fs/fspath"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/unknwon/goconfig" //nolint:misspell // unknwon is the package author's GitHub username
 	"google.golang.org/grpc"
@@ -274,6 +277,99 @@ func parseAllConfigRemotes(configData string) (map[string]map[string]string, err
 	}
 
 	return allSections, nil
+}
+
+const remotePrefixHashLen = 16
+
+// remotePrefixForVolume returns a stable rclone-safe prefix for isolating config
+// sections belonging to a volume. Empty override → "csi" + sha256(volumeID)[:16].
+func remotePrefixForVolume(volumeID, override string) string {
+	if override != "" {
+		return fspath.MakeConfigName(override)
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(volumeID)))[:remotePrefixHashLen]
+	return "csi" + hash
+}
+
+// rewriteRemoteReferences rewrites remote path tokens (name: / name:path) in a
+// config value using rename (old section → new section). Longest names first.
+func rewriteRemoteReferences(value string, rename map[string]string) string {
+	if value == "" || len(rename) == 0 {
+		return value
+	}
+	names := make([]string, 0, len(rename))
+	for name := range rename {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return len(names[i]) > len(names[j])
+	})
+	result := value
+	for _, old := range names {
+		result = strings.ReplaceAll(result, old+":", rename[old]+":")
+	}
+	return result
+}
+
+// isolateConfigRemotes renames every INI section with prefix and rewrites nested
+// remote references (remote=, upstreams=). Returns rewritten config and the
+// effective (prefixed) name for logicalRemote.
+func isolateConfigRemotes(configData, logicalRemote, prefix string) (string, string, error) {
+	allRemotes, err := parseAllConfigRemotes(configData)
+	if err != nil {
+		return "", "", err
+	}
+	if len(allRemotes) == 0 {
+		return "", "", fmt.Errorf("configData has no remotes")
+	}
+	if _, ok := allRemotes[logicalRemote]; !ok {
+		return "", "", fmt.Errorf("logical remote %q not found in configData", logicalRemote)
+	}
+
+	rename := make(map[string]string, len(allRemotes))
+	for name := range allRemotes {
+		rename[name] = fspath.MakeConfigName(prefix + "-" + name)
+	}
+
+	isolated := make(map[string]map[string]string, len(allRemotes))
+	for name, data := range allRemotes {
+		newData := make(map[string]string, len(data))
+		for key, value := range data {
+			switch strings.ToLower(key) {
+			case "remote", "upstreams":
+				newData[key] = rewriteRemoteReferences(value, rename)
+			default:
+				newData[key] = value
+			}
+		}
+		isolated[rename[name]] = newData
+	}
+
+	return serializeConfigRemotes(isolated), rename[logicalRemote], nil
+}
+
+// serializeConfigRemotes writes remotes back to INI form (order not guaranteed).
+func serializeConfigRemotes(remotes map[string]map[string]string) string {
+	names := make([]string, 0, len(remotes))
+	for name := range remotes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var sb strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&sb, "[%s]\n", name)
+		keys := make([]string, 0, len(remotes[name]))
+		for k := range remotes[name] {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&sb, "%s = %s\n", k, remotes[name][k])
+		}
+		sb.WriteByte('\n')
+	}
+	return sb.String()
 }
 
 // extractRemoteTypeParams filters and returns parameters for a given remote type.

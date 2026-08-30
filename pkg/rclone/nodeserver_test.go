@@ -26,7 +26,9 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	mount "k8s.io/mount-utils"
@@ -456,3 +458,89 @@ func TestLegacyPublishUnpublishShareLockKey(t *testing.T) {
 		t.Fatal("NodeUnpublishVolume did not acquire publish lock after release")
 	}
 }
+
+func TestPrepareIsolatedConfigDualVolumesNoCollision(t *testing.T) {
+	ns, err := getTestNodeServer()
+	require.NoError(t, err)
+
+	configData := "[rustfs]\ntype = s3\nprovider = Other\naccess_key_id = KEY\nsecret_access_key = SECRET\n"
+	volA := "rustfs#pvc-good"
+	volB := "rustfs#pvc-bad"
+
+	pvpA := &publishVolumeParams{remoteName: "rustfs", configData: configData, params: map[string]string{}}
+	pvpB := &publishVolumeParams{remoteName: "rustfs", configData: configData, params: map[string]string{}}
+
+	require.NoError(t, ns.prepareIsolatedConfig(volA, pvpA))
+	require.NoError(t, ns.prepareIsolatedConfig(volB, pvpB))
+	assert.NotEqual(t, pvpA.remoteName, pvpB.remoteName)
+	assert.Contains(t, pvpA.remoteName, "rustfs")
+	assert.Contains(t, pvpB.remoteName, "rustfs")
+
+	remotesA, err := ns.loadRcloneConfig(context.Background(), pvpA)
+	require.NoError(t, err)
+	remotesB, err := ns.loadRcloneConfig(context.Background(), pvpB)
+	require.NoError(t, err)
+
+	valA, foundA := config.LoadedData().GetValue(pvpA.remoteName, "access_key_id")
+	valB, foundB := config.LoadedData().GetValue(pvpB.remoteName, "access_key_id")
+	assert.True(t, foundA)
+	assert.True(t, foundB)
+	assert.Equal(t, "KEY", valA)
+	assert.Equal(t, "KEY", valB)
+	_, foundLogical := config.LoadedData().GetValue("rustfs", "access_key_id")
+	assert.False(t, foundLogical, "logical rustfs section must not be loaded")
+
+	ns.cleanupConfigRemotes(remotesA)
+	_, foundA = config.LoadedData().GetValue(pvpA.remoteName, "access_key_id")
+	assert.False(t, foundA)
+	valB, foundB = config.LoadedData().GetValue(pvpB.remoteName, "access_key_id")
+	assert.True(t, foundB)
+	assert.Equal(t, "KEY", valB, "cleanup of volume A must not delete volume B section")
+
+	ns.cleanupConfigRemotes(remotesB)
+	_, foundB = config.LoadedData().GetValue(pvpB.remoteName, "access_key_id")
+	assert.False(t, foundB)
+}
+
+func TestPrepareIsolatedConfigDifferentCredsStayIsolated(t *testing.T) {
+	ns, err := getTestNodeServer()
+	require.NoError(t, err)
+
+	good := "[rustfs]\ntype = s3\naccess_key_id = good\n"
+	bad := "[rustfs]\ntype = s3\naccess_key_id = wrong\n"
+
+	pvpGood := &publishVolumeParams{remoteName: "rustfs", configData: good, params: map[string]string{}}
+	pvpBad := &publishVolumeParams{remoteName: "rustfs", configData: bad, params: map[string]string{}}
+
+	require.NoError(t, ns.prepareIsolatedConfig("vol-good", pvpGood))
+	require.NoError(t, ns.prepareIsolatedConfig("vol-bad", pvpBad))
+
+	_, err = ns.loadRcloneConfig(context.Background(), pvpGood)
+	require.NoError(t, err)
+	_, err = ns.loadRcloneConfig(context.Background(), pvpBad)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ns.cleanupConfigRemotes([]string{pvpGood.remoteName, pvpBad.remoteName})
+	})
+
+	goodKey, foundGood := config.LoadedData().GetValue(pvpGood.remoteName, "access_key_id")
+	badKey, foundBad := config.LoadedData().GetValue(pvpBad.remoteName, "access_key_id")
+	assert.True(t, foundGood)
+	assert.True(t, foundBad)
+	assert.Equal(t, "good", goodKey)
+	assert.Equal(t, "wrong", badKey)
+}
+
+func TestExtractPublishParamsRemotePrefixReserved(t *testing.T) {
+	pvp, err := extractPublishParams(map[string]string{
+		paramRemote:       "rustfs",
+		paramConfigData:   "[rustfs]\ntype = s3\n",
+		paramRemotePrefix: "shared-ns",
+		"vfs-cache-mode":   "writes",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "shared-ns", pvp.remotePrefix)
+	assert.NotContains(t, pvp.params, paramRemotePrefix)
+	assert.Equal(t, "writes", pvp.params["vfs_cache_mode"])
+}
+

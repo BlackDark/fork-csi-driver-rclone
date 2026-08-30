@@ -20,7 +20,7 @@ If the driver OOMs, FUSE mounts can become stale (kernel mount entry remains but
 
 ### Reduce OOM risk
 
-- Prefer `vfs-cache-mode=writes` or `minimal` over `full` unless read caching is required
+- Prefer `vfs-cache-mode=writes` over `full` unless read caching is required (`off`/`minimal` use less memory but cannot append — see [driver-parameters.md](driver-parameters.md))
 - Cap `vfs-cache-max-size` to a fraction of container memory
 - Use a hostPath or emptyDir for `cache_dir` / `temp_dir` to keep page cache pressure out of the container cgroup
 - Increase `node.resources.rclone.limits.memory` before raising cache sizes

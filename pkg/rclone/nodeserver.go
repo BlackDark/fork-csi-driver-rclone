@@ -50,6 +50,7 @@ const (
 	paramMountType             = "mount_type"
 	paramBackendType           = "remoteType"
 	paramBackendTypeKey        = "type"
+	paramRemotePrefix          = "remotePrefix"
 	paramDisabledFeatures      = "disable"
 	paramVolumeMountGroup      = "gid"
 	paramVolumeMountUser       = "uid"
@@ -73,10 +74,11 @@ const (
 
 // reservedParams contains parameter names that should not be passed to rclone backend
 var reservedParams = map[string]bool{
-	paramRemote:      true,
-	paramRemotePath:  true,
-	paramConfigData:  true,
-	paramBackendType: true,
+	paramRemote:       true,
+	paramRemotePath:   true,
+	paramConfigData:   true,
+	paramBackendType:  true,
+	paramRemotePrefix: true,
 }
 
 // mountContext stores context information for each mount with direct rclone objects
@@ -179,11 +181,12 @@ func validateUnpublishVolumeRequest(req *csi.NodeUnpublishVolumeRequest) error {
 
 // publishVolumeParams holds parameters for volume publishing
 type publishVolumeParams struct {
-	remoteName string
-	remotePath string
-	configData string
-	remoteType string
-	params     map[string]string
+	remoteName   string
+	remotePath   string
+	configData   string
+	remoteType   string
+	remotePrefix string // optional override for per-volume section prefix
+	params       map[string]string
 }
 
 // setRcloneConfigFlags sets global rclone configuration flags
@@ -290,11 +293,12 @@ func (ns *NodeServer) mergeVolumeParameters(req *csi.NodePublishVolumeRequest) m
 // extractPublishParams extracts and validates required parameters
 func extractPublishParams(params map[string]string) (*publishVolumeParams, error) {
 	pvp := &publishVolumeParams{
-		remoteName: params[paramRemote],
-		remotePath: params[paramRemotePath],
-		configData: params[paramConfigData],
-		remoteType: params[paramBackendType],
-		params:     make(map[string]string),
+		remoteName:   params[paramRemote],
+		remotePath:   params[paramRemotePath],
+		configData:   params[paramConfigData],
+		remoteType:   params[paramBackendType],
+		remotePrefix: params[paramRemotePrefix],
+		params:       make(map[string]string),
 	}
 
 	if pvp.remoteName == "" {
@@ -428,6 +432,35 @@ func generateConfigData(pvp *publishVolumeParams) error {
 	}
 
 	return nil
+}
+
+// prepareIsolatedConfig rewrites pvp.configData section names and pvp.remoteName
+// so concurrent mounts with the same logical remote do not collide in LoadedData.
+func (ns *NodeServer) prepareIsolatedConfig(volumeID string, pvp *publishVolumeParams) error {
+	prefix := remotePrefixForVolume(volumeID, pvp.remotePrefix)
+	newConfig, effectiveRemote, err := isolateConfigRemotes(pvp.configData, pvp.remoteName, prefix)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "failed to isolate config remotes: %v", err)
+	}
+	klog.V(4).Infof("Isolated config for volume %s: remote %s → %s (prefix %s)",
+		volumeID, pvp.remoteName, effectiveRemote, prefix)
+	pvp.configData = newConfig
+	pvp.remoteName = effectiveRemote
+	return nil
+}
+
+// mountParamsForState returns MountParams for persistence, including remotePrefix
+// when set so RemountState can re-apply the same isolation override.
+func mountParamsForState(pvp *publishVolumeParams) map[string]string {
+	if pvp.remotePrefix == "" {
+		return pvp.params
+	}
+	out := maps.Clone(pvp.params)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	out[paramRemotePrefix] = pvp.remotePrefix
+	return out
 }
 
 // loadRcloneConfig loads config into rclone's in-memory storage
@@ -998,6 +1031,13 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 		return nil, err
 	}
 
+	// Persist logical/original config; isolate only for in-process LoadedData.
+	originalConfigData := pvp.configData
+	originalRemoteName := pvp.remoteName
+	if err := ns.prepareIsolatedConfig(volumeID, pvp); err != nil {
+		return nil, err
+	}
+
 	// Load rclone config
 	remotes, err := ns.loadRcloneConfig(ctx, pvp)
 	if err != nil {
@@ -1056,11 +1096,11 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 				VolumeID:     volumeID,
 				TargetPath:   targetPath,
 				Timestamp:    time.Now(),
-				ConfigData:   pvp.configData,
-				RemoteName:   pvp.remoteName,
+				ConfigData:   originalConfigData,
+				RemoteName:   originalRemoteName,
 				RemotePath:   pvp.remotePath,
 				RemoteType:   pvp.remoteType,
-				MountParams:  pvp.params,
+				MountParams:  mountParamsForState(pvp),
 				MountOptions: mountOptions,
 				ReadOnly:     readOnly,
 			}
@@ -1457,12 +1497,27 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 		}
 	}
 
+	mountParams := state.MountParams
+	remotePrefix := ""
+	if mountParams != nil {
+		if v, ok := mountParams[paramRemotePrefix]; ok {
+			remotePrefix = v
+			mountParams = maps.Clone(mountParams)
+			delete(mountParams, paramRemotePrefix)
+		}
+	}
+
 	pvp := &publishVolumeParams{
-		remoteName: state.RemoteName,
-		remotePath: state.RemotePath,
-		configData: state.ConfigData,
-		remoteType: state.RemoteType,
-		params:     state.MountParams,
+		remoteName:   state.RemoteName,
+		remotePath:   state.RemotePath,
+		configData:   state.ConfigData,
+		remoteType:   state.RemoteType,
+		remotePrefix: remotePrefix,
+		params:       mountParams,
+	}
+
+	if err := ns.prepareIsolatedConfig(state.VolumeID, pvp); err != nil {
+		return fmt.Errorf("failed to isolate config: %w", err)
 	}
 
 	remotes, err := ns.loadRcloneConfig(ctx, pvp)

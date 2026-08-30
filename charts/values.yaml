@@ -71,6 +71,8 @@ controller:
   replicas: 1
   strategyType: Recreate
   runOnMaster: false
+  # When true, schedules via nodeAffinity Exists on node-role.kubernetes.io/control-plane
+  # (matches kubeadm empty-string and k3s/RKE2 "true"). Do not set affinity alongside this flag.
   runOnControlPlane: false
   livenessProbe:
     healthPort: 29652
@@ -331,6 +333,7 @@ storageClass:
 #   reclaimPolicy: Delete
 #   volumeBindingMode: Immediate
 #   mountOptions:
+#     # writes required for append (>>); off/minimal break non-O_TRUNC writes
 #     - vfs-cache-mode=writes
 #     - vfs-cache-max-size=10G
 

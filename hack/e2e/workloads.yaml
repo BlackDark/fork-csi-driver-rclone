@@ -111,7 +111,8 @@ reclaimPolicy: Delete
 volumeBindingMode: Immediate
 mountOptions:
   - allow-other
-  - vfs-cache-mode=off
+  - vfs-cache-mode=writes
+  - vfs-cache-max-size=256M
 ---
 apiVersion: v1
 kind: Pod

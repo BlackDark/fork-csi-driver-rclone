@@ -17,6 +17,7 @@ limitations under the License.
 package rclone
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -332,3 +333,93 @@ func TestSanitizeFlag(t *testing.T) {
 		})
 	}
 }
+
+func TestRemotePrefixForVolume(t *testing.T) {
+	p1 := remotePrefixForVolume("rustfs#pvc-a", "")
+	p2 := remotePrefixForVolume("rustfs#pvc-a", "")
+	p3 := remotePrefixForVolume("rustfs#pvc-b", "")
+	assert.Equal(t, p1, p2)
+	assert.NotEqual(t, p1, p3)
+	assert.True(t, strings.HasPrefix(p1, "csi"))
+	assert.Len(t, p1, 3+16) // "csi" + 16 hex
+
+	override := remotePrefixForVolume("any", "My Prefix!")
+	assert.Equal(t, "My Prefix_", override)
+
+	hashOnly := remotePrefixForVolume("vol#id", "bad/name:x")
+	assert.NotContains(t, hashOnly, "/")
+	assert.NotContains(t, hashOnly, ":")
+}
+
+func TestIsolateConfigRemotesSimple(t *testing.T) {
+	config := "[rustfs]\ntype = s3\naccess_key_id = good\n"
+	prefix := remotePrefixForVolume("vol-a", "")
+	newConfig, effective, err := isolateConfigRemotes(config, "rustfs", prefix)
+	assert.NoError(t, err)
+	assert.Equal(t, prefix+"-rustfs", effective)
+
+	parsed, err := parseAllConfigRemotes(newConfig)
+	assert.NoError(t, err)
+	assert.Contains(t, parsed, effective)
+	assert.NotContains(t, parsed, "rustfs")
+	assert.Equal(t, "good", parsed[effective]["access_key_id"])
+}
+
+func TestIsolateConfigRemotesNested(t *testing.T) {
+	config := `
+[minio-sample]
+type = s3
+provider = Minio
+
+[minio-encrypted-base]
+type = alias
+remote = minio-sample:/encrypted
+
+[minio-sample-crypt]
+type = crypt
+remote = minio-encrypted-base:
+password = x
+
+[minio-sample-chunker]
+type = chunker
+remote = minio-sample-crypt:
+chunk_size = 128Mi
+
+[minio-union]
+type = union
+upstreams = minio-sample-chunker: minio-sample-crypt:
+create_policy = epff
+`
+	prefix := "csiabc123"
+	newConfig, effective, err := isolateConfigRemotes(config, "minio-union", prefix)
+	assert.NoError(t, err)
+	assert.Equal(t, "csiabc123-minio-union", effective)
+
+	parsed, err := parseAllConfigRemotes(newConfig)
+	assert.NoError(t, err)
+	assert.Len(t, parsed, 5)
+
+	assert.Equal(t, "csiabc123-minio-sample:/encrypted",
+		parsed["csiabc123-minio-encrypted-base"]["remote"])
+	assert.Equal(t, "csiabc123-minio-encrypted-base:",
+		parsed["csiabc123-minio-sample-crypt"]["remote"])
+	assert.Equal(t, "csiabc123-minio-sample-crypt:",
+		parsed["csiabc123-minio-sample-chunker"]["remote"])
+	assert.Equal(t, "csiabc123-minio-sample-chunker: csiabc123-minio-sample-crypt:",
+		parsed["csiabc123-minio-union"]["upstreams"])
+}
+
+func TestIsolateConfigRemotesMissingLogical(t *testing.T) {
+	_, _, err := isolateConfigRemotes("[foo]\ntype = s3\n", "bar", "csi1")
+	assert.Error(t, err)
+}
+
+func TestRewriteRemoteReferencesLongestFirst(t *testing.T) {
+	rename := map[string]string{
+		"minio":        "p-minio",
+		"minio-sample": "p-minio-sample",
+	}
+	got := rewriteRemoteReferences("minio-sample:/path minio:", rename)
+	assert.Equal(t, "p-minio-sample:/path p-minio:", got)
+}
+

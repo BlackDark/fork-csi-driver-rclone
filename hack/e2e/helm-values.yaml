@@ -32,7 +32,8 @@ storageClass:
   volumeBindingMode: Immediate
   mountOptions:
     - allow-other
-    - vfs-cache-mode=off
+    - vfs-cache-mode=writes
+    - vfs-cache-max-size=256M
   parameters:
     remote: minio
     remotePath: e2e-bucket

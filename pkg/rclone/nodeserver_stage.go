@@ -181,6 +181,12 @@ func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeR
 		return err
 	}
 
+	originalConfigData := pvp.configData
+	originalRemoteName := pvp.remoteName
+	if err := ns.prepareIsolatedConfig(volumeID, pvp); err != nil {
+		return err
+	}
+
 	remotes, err := ns.loadRcloneConfig(ctx, pvp)
 	if err != nil {
 		return err
@@ -221,11 +227,11 @@ func (ns *NodeServer) stageVolume(ctx context.Context, req *csi.NodeStageVolumeR
 			StagingPath:  stagingPath,
 			TargetPath:   stagingPath,
 			Timestamp:    time.Now(),
-			ConfigData:   pvp.configData,
-			RemoteName:   pvp.remoteName,
+			ConfigData:   originalConfigData,
+			RemoteName:   originalRemoteName,
 			RemotePath:   pvp.remotePath,
 			RemoteType:   pvp.remoteType,
-			MountParams:  pvp.params,
+			MountParams:  mountParamsForState(pvp),
 			MountOptions: mountOptions,
 		}
 		if err := ns.mountStateManager.SaveState(ctx, state); err != nil {

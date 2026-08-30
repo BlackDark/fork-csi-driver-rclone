@@ -9,6 +9,9 @@
 | `remote` | Rclone remote name (backend type) | `"s3"`, `"gcs"`, `"azureblob"`, `"dropbox"` | Yes | - |
 | `remotePath` | Path within the remote storage | `"my-bucket/folder"`, `"/data"` | No | Root of remote |
 | `configData` | Inline rclone configuration (INI format) | See examples below | No | - |
+| `remotePrefix` | Optional override for per-volume config section isolation prefix | `"tenant-a"` | No | `csi` + sha256(volumeID)[:16] |
+
+**Config isolation:** On each node, the driver rewrites INI section names (and nested `remote` / `upstreams` refs) with a per-volume prefix before loading into rclone's process-global config. Keep using familiar `remote: rustfs` + `[rustfs]` in YAML; identical names across StorageClasses no longer collide. Set `remotePrefix` only when you intentionally share one config namespace across volumes.
 
 **VolumeID Format:**
 ```
@@ -224,6 +227,8 @@ The rcloneplugin binary directly supports many rclone mount flags as command-lin
 **Common Performance Options:**
 - `--vfs-cache-mode=writes` - Cache mode (off|minimal|writes|full)
 
+> **VFS cache mode and append:** `off` and `minimal` only support create and `O_TRUNC` overwrite. Append (`>>`) and other non-`O_TRUNC` writes fail with rclone errors such as `Illegal seek` / `Can't open for write without O_TRUNC`. Typical read-write workloads need `vfs-cache-mode=writes` (or `full`). Cap `vfs-cache-max-size` relative to the node container memory limit; see [mount-recovery.md](mount-recovery.md).
+
 **Complete Flag Reference:**
 For the complete list of all supported flags and their descriptions, see the [official rclone mount documentation](https://rclone.org/commands/rclone_mount/).
 
@@ -234,6 +239,7 @@ For the complete list of all supported flags and their descriptions, see the [of
 2. **Authentication failures**: Verify credentials in `configData`
 3. **Network connectivity**: Ensure nodes can reach the storage backend
 4. **Permission errors**: Check that credentials have proper access rights
+5. **Append / `Illegal seek`**: StorageClass or PV uses `vfs-cache-mode=off` (or `minimal`); switch to `writes` for RW append workloads
 
 #### Debug Mode
 Enable debug logging using either method. For all available logging options, see the [rclone mount documentation](https://rclone.org/commands/rclone_mount/):

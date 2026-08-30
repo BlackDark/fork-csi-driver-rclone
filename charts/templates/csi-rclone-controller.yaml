@@ -25,14 +25,10 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
         kubernetes.io/role: master
-      {{- else if .Values.controller.runOnControlPlane }}
-      nodeSelector:
-        kubernetes.io/os: linux
-        node-role.kubernetes.io/control-plane: ""
       {{- else }}
       nodeSelector:
         kubernetes.io/os: linux
-        {{- if .Values.controller.nodeSelector }}
+        {{- if and (not .Values.controller.runOnControlPlane) .Values.controller.nodeSelector }}
         {{- toYaml .Values.controller.nodeSelector | nindent 8 }}
         {{- end }}
       {{- end }}
@@ -42,7 +38,17 @@ spec:
           type: RuntimeDefault
       tolerations:
         {{- toYaml .Values.controller.tolerations | nindent 8 }}
-      {{- if .Values.controller.affinity }}
+      {{- if .Values.controller.runOnControlPlane }}
+      # Presence match (Exists): works for kubeadm empty-string and k3s/RKE2 "true".
+      # Do not combine with controller.affinity — this flag owns affinity.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+      {{- else if .Values.controller.affinity }}
       affinity:
         {{- toYaml .Values.controller.affinity | nindent 8 }}
       {{- end }}

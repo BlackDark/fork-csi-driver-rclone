@@ -50,6 +50,8 @@ helm repo update
 helm install csi-rclone csi-rclone/csi-driver-rclone --namespace veloxpack
 ```
 
+To pin the controller to control-plane nodes (`controller.runOnControlPlane=true`), the chart uses nodeAffinity `Exists` on `node-role.kubernetes.io/control-plane` (works for kubeadm empty-string labels and k3s/RKE2 `true`). Do not set `controller.affinity` at the same time. For e2e placement probes, see `hack/e2e/detect-controller-placement.sh`.
+
 #### 3. Verify Installation
 ```bash
 helm list -n veloxpack
