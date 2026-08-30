@@ -217,7 +217,11 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 	refTargets := publishBindRefTargets(mountByPath, stagingComparePath, stagingMount, stagingMounted)
 
 	err = filepath.WalkDir(kubeletPodsDir, func(path string, d os.DirEntry, walkErr error) error {
-		return ns.walkPublishBindRefresh(path, d, walkErr, stagingPath, stagingComparePath, stagingVolumeNames, mountByPath, refTargets, stagingMount, stagingMounted)
+		return ns.walkPublishBindRefresh(
+			path, d, walkErr,
+			stagingPath, stagingComparePath, stagingVolumeNames,
+			mountByPath, refTargets, stagingMount, stagingMounted,
+		)
 	})
 	if err != nil {
 		return fmt.Errorf("walk kubelet publish paths: %w", err)
@@ -275,9 +279,9 @@ func (ns *NodeServer) walkPublishBindRefresh(
 	stagingMount mountTableEntry,
 	stagingMounted bool,
 ) error {
-	corruptedByWalk, skip, err := classifyPublishWalkErr(path, d, walkErr)
-	if err != nil || skip {
-		return err
+	corruptedByWalk, skip := classifyPublishWalkErr(path, d, walkErr)
+	if skip {
+		return nil
 	}
 
 	_, volumeName, ok := parseCSIPublishMountPath(path)
@@ -313,25 +317,25 @@ func (ns *NodeServer) walkPublishBindRefresh(
 	return filepath.SkipDir
 }
 
-func classifyPublishWalkErr(path string, d os.DirEntry, walkErr error) (corruptedByWalk, skip bool, err error) {
+func classifyPublishWalkErr(path string, d os.DirEntry, walkErr error) (corruptedByWalk, skip bool) {
 	if walkErr != nil {
 		if os.IsNotExist(walkErr) {
-			return false, true, nil
+			return false, true
 		}
 		if filepath.Base(path) != csiPublishMountDir {
 			klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
-			return false, true, nil
+			return false, true
 		}
 		if !mount.IsCorruptedMnt(walkErr) {
 			klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
-			return false, true, nil
+			return false, true
 		}
-		return true, false, nil
+		return true, false
 	}
 	if !d.IsDir() || filepath.Base(path) != csiPublishMountDir {
-		return false, true, nil
+		return false, true
 	}
-	return false, false, nil
+	return false, false
 }
 
 func (ns *NodeServer) rebindPublishFromStaging(stagingPath, target string, readOnly bool) error {
