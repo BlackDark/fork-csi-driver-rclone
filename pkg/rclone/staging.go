@@ -197,15 +197,11 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 	stagingComparePath := canonicalMountPath(stagingPath)
 	stagingVolumeNames := stagingVolumeNameSet(stagingPath, volumeID)
 
-	sourceRefs, err := ns.mounter.GetMountRefs(stagingPath)
-	if err != nil {
-		return fmt.Errorf("get mount refs for %s: %w", stagingPath, err)
-	}
-	refTargets := make(map[string]struct{}, len(sourceRefs))
-	for _, ref := range sourceRefs {
-		refTargets[canonicalMountPath(ref)] = struct{}{}
-	}
-
+	// Discover bind refs from the mount table only. Do not call GetMountRefs /
+	// PathExists / EvalSymlinks on stagingPath: those Stat the live rclone FUSE
+	// from this same process and deadlock (request_wait_answer vs fuse_dev_do_read),
+	// especially with vfs-cache-mode=writes. RemountAllStates runs before gRPC
+	// listen, so that hang blocks CSI socket forever.
 	mounts, err := ns.mounter.List()
 	if err != nil {
 		return fmt.Errorf("list mounts: %w", err)
@@ -215,7 +211,8 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 		options []string
 	}, len(mounts))
 	for _, mp := range mounts {
-		mountByPath[canonicalMountPath(mp.Path)] = struct {
+		path := canonicalMountPath(mp.Path)
+		mountByPath[path] = struct {
 			source  string
 			options []string
 		}{
@@ -224,6 +221,21 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 		}
 	}
 	stagingMount, stagingMounted := mountByPath[stagingComparePath]
+
+	// Bind mounts share the staging mount's Device in /proc (and FakeMounter).
+	refTargets := make(map[string]struct{}, len(mountByPath))
+	if stagingMounted {
+		for path, mp := range mountByPath {
+			if path != stagingComparePath && mp.source == stagingMount.source {
+				refTargets[path] = struct{}{}
+			}
+		}
+	}
+	for path, mp := range mountByPath {
+		if path != stagingComparePath && mp.source == stagingComparePath {
+			refTargets[path] = struct{}{}
+		}
+	}
 
 	err = filepath.WalkDir(kubeletPodsDir, func(path string, d os.DirEntry, walkErr error) error {
 		corruptedByWalk := false
@@ -295,11 +307,18 @@ func stagingVolumeNameSet(stagingPath, volumeID string) map[string]struct{} {
 
 func canonicalMountPath(path string) string {
 	clean := filepath.Clean(path)
-	realPath, err := filepath.EvalSymlinks(clean)
+	// Resolve symlinks in the parent only. Never EvalSymlinks/Stat the final
+	// component: if it is a live rclone FUSE mount owned by this process,
+	// GETATTR deadlocks remount (request_wait_answer vs fuse_dev_do_read).
+	dir, base := filepath.Dir(clean), filepath.Base(clean)
+	if dir == "." || dir == string(filepath.Separator) {
+		return clean
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return clean
 	}
-	return filepath.Clean(realPath)
+	return filepath.Join(realDir, base)
 }
 
 func parseCSIPublishMountPath(path string) (podUID, volumeName string, ok bool) {

@@ -119,6 +119,20 @@ func TestGetDefaultStagingPathUsesDriverName(t *testing.T) {
 	), ns.getDefaultStagingPath(volumeID))
 }
 
+func TestCanonicalMountPathResolvesParentOnly(t *testing.T) {
+	root := t.TempDir()
+	linkDir := filepath.Join(root, "link-parent")
+	realDir := filepath.Join(root, "real-parent")
+	require.NoError(t, os.MkdirAll(realDir, 0755))
+	require.NoError(t, os.Symlink(realDir, linkDir))
+
+	got := canonicalMountPath(filepath.Join(linkDir, "globalmount"))
+	realParent, err := filepath.EvalSymlinks(realDir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(realParent, "globalmount"), got)
+	assert.Equal(t, "globalmount", filepath.Base(got))
+}
+
 func TestRefreshPublishBindsRebindsMountFromStagingPath(t *testing.T) {
 	ns, fm := newTestNodeServerWithStaging(t)
 	kubeletDir := t.TempDir()
