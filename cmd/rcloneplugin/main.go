@@ -32,11 +32,13 @@ import (
 )
 
 var (
-	endpoint   = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
-	nodeID     = flag.String("nodeid", "", "node id")
-	driverName = flag.String("drivername", rclone.DefaultDriverName, "name of the driver")
-	remount    = flag.Bool("remount", false, "remount existing volume mount points on startup")
-	staging    = flag.Bool("staging", false, "enable CSI NodeStageVolume staging path")
+	endpoint     = flag.String("endpoint", "unix://tmp/csi.sock", "CSI endpoint")
+	nodeID       = flag.String("nodeid", "", "node id")
+	driverName   = flag.String("drivername", rclone.DefaultDriverName, "name of the driver")
+	remount      = flag.Bool("remount", false, "remount existing volume mount points on startup")
+	staging      = flag.Bool("staging", false, "enable CSI NodeStageVolume staging path")
+	mountTimeout = flag.Duration("mount-timeout", 90*time.Second,
+		"maximum time NodePublishVolume waits for a mount before returning and reaping it in the background")
 )
 
 func main() {
@@ -104,11 +106,12 @@ func main() {
 	}
 
 	driverOptions := rclone.DriverOptions{
-		NodeID:     *nodeID,
-		DriverName: *driverName,
-		Endpoint:   *endpoint,
-		Remount:    *remount,
-		Staging:    *staging,
+		NodeID:       *nodeID,
+		DriverName:   *driverName,
+		Endpoint:     *endpoint,
+		Remount:      *remount,
+		Staging:      *staging,
+		MountTimeout: *mountTimeout,
 	}
 
 	driver := rclone.NewDriver(&driverOptions)

@@ -1,8 +1,0 @@
-.vscode/*
-.vscode
-bin/*
-bin
-.DS_Store
-pkg
-vendor
-xcuserdata

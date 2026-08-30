@@ -1,5 +1,0 @@
-build
-gohdfs*
-hdfs
-!hdfs/
-minicluster.log

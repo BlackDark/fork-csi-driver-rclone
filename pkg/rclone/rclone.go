@@ -19,6 +19,7 @@ package rclone
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -49,21 +50,26 @@ type DriverOptions struct {
 	Endpoint   string
 	Remount    bool
 	Staging    bool
+	// MountTimeout bounds how long NodePublishVolume waits for a mount to complete
+	// before returning (releasing its volume lock) and reaping the mount in the
+	// background. Zero falls back to defaultMountTimeout.
+	MountTimeout time.Duration
 }
 
 // Driver is the main driver structure
 type Driver struct {
-	name        string
-	remount     bool
-	staging     bool
-	nodeID      string
-	version     string
-	endpoint    string
-	ns          *NodeServer
-	server      NonBlockingGRPCServer
-	cscap       []*csi.ControllerServiceCapability
-	nscap       []*csi.NodeServiceCapability
-	volumeLocks *VolumeLocks
+	name         string
+	remount      bool
+	staging      bool
+	nodeID       string
+	version      string
+	endpoint     string
+	mountTimeout time.Duration
+	ns           *NodeServer
+	server       NonBlockingGRPCServer
+	cscap        []*csi.ControllerServiceCapability
+	nscap        []*csi.NodeServiceCapability
+	volumeLocks  *VolumeLocks
 }
 
 // NewDriver creates a new driver instance
@@ -74,12 +80,13 @@ func NewDriver(options *DriverOptions) *Driver {
 	InitRcloneLogging()
 
 	d := &Driver{
-		name:     options.DriverName,
-		version:  driverVersion,
-		nodeID:   options.NodeID,
-		endpoint: options.Endpoint,
-		remount:  options.Remount,
-		staging:  options.Staging,
+		name:         options.DriverName,
+		version:      driverVersion,
+		nodeID:       options.NodeID,
+		endpoint:     options.Endpoint,
+		remount:      options.Remount,
+		staging:      options.Staging,
+		mountTimeout: options.MountTimeout,
 	}
 
 	d.AddControllerServiceCapabilities([]csi.ControllerServiceCapability_RPC_Type{
@@ -250,10 +257,7 @@ func (d *Driver) ForceCacheSync(ctx context.Context) error {
 	}
 
 	d.ns.mu.RLock()
-	mountContexts := make(map[string]*mountContext, len(d.ns.mountContext))
-	for targetPath, mc := range d.ns.mountContext {
-		mountContexts[targetPath] = mc
-	}
+	mountContexts := maps.Clone(d.ns.mountContext)
 	d.ns.mu.RUnlock()
 
 	if len(mountContexts) == 0 {
