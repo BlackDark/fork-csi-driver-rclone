@@ -1562,9 +1562,14 @@ func (ns *NodeServer) RemountState(ctx context.Context, state *MountState) error
 			stagingPath: mountPath,
 			mountCtx:    mc,
 		})
-		if err := ns.refreshPublishBindsForVolume(mountPath, state.VolumeID); err != nil {
-			return fmt.Errorf("refresh publish binds: %w", err)
-		}
+		// Skip publish bind refresh on remount boot. WalkDir/ReadDir into a live
+		// bind of this process's FUSE deadlocks (request_wait_answer vs
+		// fuse_dev_do_read) before gRPC listen — especially vfs-cache-mode=writes.
+		// Volume-recovery-operator restarts workloads; NodePublish creates fresh binds.
+		klog.V(2).Infof(
+			"Skipping publish bind refresh after remount of %s; workloads need restart for new binds",
+			state.VolumeID,
+		)
 	}
 
 	klog.V(2).Infof("Successfully remounted volume %s to %s", state.VolumeID, mountPath)

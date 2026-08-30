@@ -182,9 +182,12 @@ func (ns *NodeServer) rebuildStagedVolumeAfterRemount(
 		stagingPath: stagingPath,
 		mountCtx:    ns.getMountContext(stagingPath),
 	})
-	if err := ns.refreshPublishBindsForVolume(stagingPath, state.VolumeID); err != nil {
-		return fmt.Errorf("refresh publish binds: %w", err)
-	}
+	// Do not refresh publish binds here: WalkDir/ReadDir into a live bind of our
+	// own FUSE deadlocks remount before gRPC listen. Operator restarts workloads.
+	klog.V(2).Infof(
+		"Skipping publish bind refresh after remount of %s; workloads need restart for new binds",
+		state.VolumeID,
+	)
 	return nil
 }
 
@@ -192,36 +195,58 @@ func (ns *NodeServer) refreshPublishBinds(stagingPath string) error {
 	return ns.refreshPublishBindsForVolume(stagingPath, "")
 }
 
+type mountTableEntry struct {
+	source  string
+	options []string
+}
+
+// refreshPublishBindsForVolume rebinds kubelet publish paths that still point at
+// stagingPath. Never Stat/ReadDir/EvalSymlinks a path that is (or becomes) a live
+// bind of this process's rclone FUSE — that deadlocks with vfs-cache-mode=writes.
+// Remount boot skips this entirely; keep the WalkDir path safe for any future caller.
 func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string) error {
 	stagingPath = filepath.Clean(stagingPath)
 	stagingComparePath := canonicalMountPath(stagingPath)
 	stagingVolumeNames := stagingVolumeNameSet(stagingPath, volumeID)
 
-	// Discover bind refs from the mount table only. Do not call GetMountRefs /
-	// PathExists / EvalSymlinks on stagingPath: those Stat the live rclone FUSE
-	// from this same process and deadlock (request_wait_answer vs fuse_dev_do_read),
-	// especially with vfs-cache-mode=writes. RemountAllStates runs before gRPC
-	// listen, so that hang blocks CSI socket forever.
+	mountByPath, err := ns.mountTableByPath()
+	if err != nil {
+		return err
+	}
+	stagingMount, stagingMounted := mountByPath[stagingComparePath]
+	refTargets := publishBindRefTargets(mountByPath, stagingComparePath, stagingMount, stagingMounted)
+
+	err = filepath.WalkDir(kubeletPodsDir, func(path string, d os.DirEntry, walkErr error) error {
+		return ns.walkPublishBindRefresh(path, d, walkErr, stagingPath, stagingComparePath, stagingVolumeNames, mountByPath, refTargets, stagingMount, stagingMounted)
+	})
+	if err != nil {
+		return fmt.Errorf("walk kubelet publish paths: %w", err)
+	}
+	return nil
+}
+
+func (ns *NodeServer) mountTableByPath() (map[string]mountTableEntry, error) {
 	mounts, err := ns.mounter.List()
 	if err != nil {
-		return fmt.Errorf("list mounts: %w", err)
+		return nil, fmt.Errorf("list mounts: %w", err)
 	}
-	mountByPath := make(map[string]struct {
-		source  string
-		options []string
-	}, len(mounts))
+	mountByPath := make(map[string]mountTableEntry, len(mounts))
 	for _, mp := range mounts {
 		path := canonicalMountPath(mp.Path)
-		mountByPath[path] = struct {
-			source  string
-			options []string
-		}{
+		mountByPath[path] = mountTableEntry{
 			source:  canonicalMountPath(mp.Device),
 			options: append([]string(nil), mp.Opts...),
 		}
 	}
-	stagingMount, stagingMounted := mountByPath[stagingComparePath]
+	return mountByPath, nil
+}
 
+func publishBindRefTargets(
+	mountByPath map[string]mountTableEntry,
+	stagingComparePath string,
+	stagingMount mountTableEntry,
+	stagingMounted bool,
+) map[string]struct{} {
 	// Bind mounts share the staging mount's Device in /proc (and FakeMounter).
 	refTargets := make(map[string]struct{}, len(mountByPath))
 	if stagingMounted {
@@ -236,60 +261,88 @@ func (ns *NodeServer) refreshPublishBindsForVolume(stagingPath, volumeID string)
 			refTargets[path] = struct{}{}
 		}
 	}
+	return refTargets
+}
 
-	err = filepath.WalkDir(kubeletPodsDir, func(path string, d os.DirEntry, walkErr error) error {
-		corruptedByWalk := false
-		if walkErr != nil {
-			if os.IsNotExist(walkErr) {
-				return nil
-			}
-			if filepath.Base(path) != csiPublishMountDir {
-				klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
-				return nil
-			}
-			corruptedByWalk = mount.IsCorruptedMnt(walkErr)
-			if !corruptedByWalk {
-				klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
-				return nil
-			}
-		}
-		if walkErr == nil && (!d.IsDir() || filepath.Base(path) != csiPublishMountDir) {
-			return nil
-		}
+func (ns *NodeServer) walkPublishBindRefresh(
+	path string,
+	d os.DirEntry,
+	walkErr error,
+	stagingPath, stagingComparePath string,
+	stagingVolumeNames map[string]struct{},
+	mountByPath map[string]mountTableEntry,
+	refTargets map[string]struct{},
+	stagingMount mountTableEntry,
+	stagingMounted bool,
+) error {
+	corruptedByWalk, skip, err := classifyPublishWalkErr(path, d, walkErr)
+	if err != nil || skip {
+		return err
+	}
 
-		_, volumeName, ok := parseCSIPublishMountPath(path)
-		if !ok {
-			return nil
+	_, volumeName, ok := parseCSIPublishMountPath(path)
+	if !ok {
+		// Never recurse into CSI publish mounts: ReadDir on a live FUSE bind
+		// owned by this process deadlocks (even after we just rebound it).
+		if filepath.Base(path) == csiPublishMountDir {
+			return filepath.SkipDir
 		}
-
-		target := filepath.Clean(path)
-		targetComparePath := canonicalMountPath(target)
-		mp, mounted := mountByPath[targetComparePath]
-		_, sourceRef := refTargets[targetComparePath]
-		_, sameVolume := stagingVolumeNames[volumeName]
-		sourceMatches := sourceRef || (mounted && mp.source == stagingComparePath) ||
-			(sameVolume && mounted && stagingMounted && mp.source == stagingMount.source)
-		corrupted, _ := IsMountPathCorrupted(target)
-		corrupted = corrupted || corruptedByWalk
-		if !sourceMatches && (!corrupted || !sameVolume) {
-			return nil
-		}
-
-		readOnly := mountOptionsReadOnly(mp.options)
-		if err := ns.unbindPublish(target); err != nil {
-			return fmt.Errorf("unbind publish %s: %w", target, err)
-		}
-		if err := os.MkdirAll(target, 0755); err != nil {
-			return fmt.Errorf("recreate publish target %s: %w", target, err)
-		}
-		if err := ns.bindPublish(stagingPath, target, readOnly); err != nil {
-			return fmt.Errorf("bind publish %s from %s: %w", target, stagingPath, err)
-		}
-		klog.Infof("Refreshed publish bind %s from staging path %s", target, stagingPath)
 		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("walk kubelet publish paths: %w", err)
+	}
+
+	target := filepath.Clean(path)
+	targetComparePath := canonicalMountPath(target)
+	mp, mounted := mountByPath[targetComparePath]
+	_, sourceRef := refTargets[targetComparePath]
+	_, sameVolume := stagingVolumeNames[volumeName]
+	sourceMatches := sourceRef || (mounted && mp.source == stagingComparePath) ||
+		(sameVolume && mounted && stagingMounted && mp.source == stagingMount.source)
+
+	// Mount-table / WalkDir errors only. Do not IsMountPathCorrupted/ReadDir:
+	// that Stats live binds of our FUSE and deadlocks remount.
+	needsRefresh := sourceMatches || (corruptedByWalk && sameVolume) ||
+		(sameVolume && mounted && stagingMounted && !sourceMatches)
+	if !needsRefresh {
+		return filepath.SkipDir
+	}
+
+	if err := ns.rebindPublishFromStaging(stagingPath, target, mountOptionsReadOnly(mp.options)); err != nil {
+		return err
+	}
+	klog.Infof("Refreshed publish bind %s from staging path %s", target, stagingPath)
+	return filepath.SkipDir
+}
+
+func classifyPublishWalkErr(path string, d os.DirEntry, walkErr error) (corruptedByWalk, skip bool, err error) {
+	if walkErr != nil {
+		if os.IsNotExist(walkErr) {
+			return false, true, nil
+		}
+		if filepath.Base(path) != csiPublishMountDir {
+			klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
+			return false, true, nil
+		}
+		if !mount.IsCorruptedMnt(walkErr) {
+			klog.V(4).InfoS("skipping path during publish bind refresh", "path", path, "err", walkErr)
+			return false, true, nil
+		}
+		return true, false, nil
+	}
+	if !d.IsDir() || filepath.Base(path) != csiPublishMountDir {
+		return false, true, nil
+	}
+	return false, false, nil
+}
+
+func (ns *NodeServer) rebindPublishFromStaging(stagingPath, target string, readOnly bool) error {
+	if err := ns.unbindPublish(target); err != nil {
+		return fmt.Errorf("unbind publish %s: %w", target, err)
+	}
+	if err := os.MkdirAll(target, 0755); err != nil {
+		return fmt.Errorf("recreate publish target %s: %w", target, err)
+	}
+	if err := ns.bindPublish(stagingPath, target, readOnly); err != nil {
+		return fmt.Errorf("bind publish %s from %s: %w", target, stagingPath, err)
 	}
 	return nil
 }

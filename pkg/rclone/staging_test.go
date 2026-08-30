@@ -164,7 +164,7 @@ func TestRefreshPublishBindsRebindsMountFromStagingPath(t *testing.T) {
 	}, fm.mounts[0])
 }
 
-func TestRemountStateRebuildsStagingCacheAndRefreshesBindsWhenAlreadyHealthy(t *testing.T) {
+func TestRemountStateRebuildsStagingCacheWithoutRefreshWhenAlreadyHealthy(t *testing.T) {
 	ns, fm := newTestNodeServerWithStaging(t)
 	kubeletDir := t.TempDir()
 	volumeID := "minio#pvc-healthy-refresh"
@@ -205,12 +205,101 @@ func TestRemountStateRebuildsStagingCacheAndRefreshesBindsWhenAlreadyHealthy(t *
 	require.NoError(t, err)
 	assert.False(t, mountCalled)
 	assert.NotNil(t, ns.getStagedVolume(volumeID))
-	assert.Contains(t, fm.unmounts, publishPath)
-	require.Len(t, fm.mounts, 1)
-	assert.Equal(t, recordedMount{
-		source:  stagingPath,
-		target:  publishPath,
-		fstype:  "",
-		options: []string{"bind"},
-	}, fm.mounts[0])
+	// Remount must not refresh publish binds (FUSE self-deadlock risk).
+	assert.Empty(t, fm.unmounts)
+	assert.Empty(t, fm.mounts)
+}
+
+func TestRefreshPublishBindsReturnsSkipDirForPublishMount(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	kubeletDir := t.TempDir()
+	stagingPath := filepath.Join(
+		kubeletDir, "plugins", "kubernetes.io", "csi", DefaultDriverName, "pv", "vol-skipdir", "globalmount",
+	)
+	require.NoError(t, os.MkdirAll(stagingPath, 0755))
+	oldPodsDir := kubeletPodsDir
+	kubeletPodsDir = filepath.Join(kubeletDir, "pods")
+	t.Cleanup(func() { kubeletPodsDir = oldPodsDir })
+
+	publishPath := filepath.Join(kubeletPodsDir, "pod-1", "volumes", "kubernetes.io~csi", "vol-skipdir", "mount")
+	require.NoError(t, os.MkdirAll(publishPath, 0755))
+	require.NoError(t, fm.Mount("test", stagingPath, "", nil))
+	require.NoError(t, fm.Mount(stagingPath, publishPath, "", []string{"bind"}))
+
+	mountByPath, err := ns.mountTableByPath()
+	require.NoError(t, err)
+	stagingCompare := canonicalMountPath(stagingPath)
+	stagingMount, stagingMounted := mountByPath[stagingCompare]
+	refTargets := publishBindRefTargets(mountByPath, stagingCompare, stagingMount, stagingMounted)
+	info, err := os.Lstat(publishPath)
+	require.NoError(t, err)
+
+	walkErr := ns.walkPublishBindRefresh(
+		publishPath,
+		fsDirEntry{info},
+		nil,
+		stagingPath,
+		stagingCompare,
+		stagingVolumeNameSet(stagingPath, "vol-skipdir"),
+		mountByPath,
+		refTargets,
+		stagingMount,
+		stagingMounted,
+	)
+
+	// Must SkipDir so filepath.WalkDir never ReadDir's into a live FUSE bind.
+	assert.ErrorIs(t, walkErr, filepath.SkipDir)
+}
+
+type fsDirEntry struct{ info os.FileInfo }
+
+func (e fsDirEntry) Name() string               { return e.info.Name() }
+func (e fsDirEntry) IsDir() bool                { return e.info.IsDir() }
+func (e fsDirEntry) Type() os.FileMode          { return e.info.Mode().Type() }
+func (e fsDirEntry) Info() (os.FileInfo, error) { return e.info, nil }
+
+func TestRemountStateSkipsPublishBindRefreshAfterMount(t *testing.T) {
+	ns, fm := newTestNodeServerWithStaging(t)
+	kubeletDir := t.TempDir()
+	volumeID := "rustfs#pvc-skip-refresh"
+	stagingPath := filepath.Join(
+		kubeletDir, "plugins", "kubernetes.io", "csi", DefaultDriverName, "pv", "vol-skip-refresh", "globalmount",
+	)
+	publishPath := filepath.Join(
+		kubeletDir, "pods", "pod-1", "volumes", "kubernetes.io~csi", "pvc-skip-refresh", "mount",
+	)
+	require.NoError(t, os.MkdirAll(stagingPath, 0755))
+	require.NoError(t, os.MkdirAll(publishPath, 0755))
+	oldPodsDir := kubeletPodsDir
+	kubeletPodsDir = filepath.Join(kubeletDir, "pods")
+	t.Cleanup(func() { kubeletPodsDir = oldPodsDir })
+
+	ns.mountFilesystem = func(_ string, target string, _ []string, _ map[string]string) (
+		*mountlib.MountPoint, context.Context, context.CancelFunc, error,
+	) {
+		require.NoError(t, fm.Mount("fuse", target, "", nil))
+		return &mountlib.MountPoint{}, context.Background(), func() {}, nil
+	}
+	// Stale publish bind present (as after CSI restart before refresh).
+	require.NoError(t, fm.Mount("old-fuse", publishPath, "", []string{"bind"}))
+	fm.mounts = nil
+	fm.unmounts = nil
+
+	err := ns.RemountState(context.Background(), &MountState{
+		VolumeID:     volumeID,
+		StagingPath:  stagingPath,
+		TargetPath:   publishPath,
+		ConfigData:   "[remote]\ntype = local\n",
+		RemoteName:   "remote",
+		MountParams:  map[string]string{},
+		MountOptions: []string{},
+	})
+
+	require.NoError(t, err)
+	assert.NotNil(t, ns.getStagedVolume(volumeID))
+	assert.Empty(t, fm.unmounts)
+	// Only the staging remount itself — no publish rebind.
+	for _, m := range fm.mounts {
+		assert.NotEqual(t, publishPath, m.target)
+	}
 }
