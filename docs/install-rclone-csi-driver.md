@@ -62,27 +62,27 @@ kubectl get pods -l app=csi-rclone-controller
 
 #### 1. Create Namespace
 ```bash
-kubectl apply -f deploy/namespace-csi-rclone.yaml
+kubectl apply -f deploy/base/namespace-csi-rclone.yaml
 ```
 
 #### 2. Create RBAC
 ```bash
-kubectl apply -f deploy/rbac-csi-rclone.yaml
+kubectl apply -f deploy/base/rbac-csi-rclone.yaml
 ```
 
 #### 3. Deploy Controller
 ```bash
-kubectl apply -f deploy/csi-rclone-controller.yaml
+kubectl apply -f deploy/base/csi-rclone-controller.yaml
 ```
 
 #### 4. Deploy Node Driver
 ```bash
-kubectl apply -f deploy/csi-rclone-node.yaml
+kubectl apply -f deploy/base/csi-rclone-node.yaml
 ```
 
 #### 5. Create CSIDriver
 ```bash
-kubectl apply -f deploy/csi-rclone-driverinfo.yaml
+kubectl apply -f deploy/base/csi-rclone-driverinfo.yaml
 ```
 
 ## Architecture Benefits

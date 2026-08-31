@@ -1,4 +1,4 @@
-{{- if .Values.rbac.create }}
+{{- if .Values.serviceAccount.create }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -13,7 +13,8 @@ metadata:
   name: {{ include "rclone.serviceAccountName.node" . }}
   namespace: {{ .Release.Namespace }}
   {{- include "rclone.labels" . | nindent 2 }}
----
+{{- end }}
+{{- if .Values.rbac.create }}
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:

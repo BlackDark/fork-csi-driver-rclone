@@ -36,14 +36,11 @@ rbac:
 
 driver:
   name: rclone.csi.veloxpack.io
-  mountPermissions: 0
 
 feature:
   # Enable inline/ephemeral volumes (allows volumes defined directly in Pod specs)
   # See: https://kubernetes.io/docs/concepts/storage/ephemeral-volumes/
   enableInlineVolume: false
-  # Propagate mount options from the host
-  propagateHostMountOptions: false
   # Enable FSGroupPolicy to allow mounting volumes with specific FSGroup
   enableFSGroupPolicy: true
 

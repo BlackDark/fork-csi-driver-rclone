@@ -73,7 +73,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: operator
-          image: ghcr.io/veloxpack/csi-driver-rclone:latest
+          image: ghcr.io/veloxpack/csi-driver-rclone-volume-recovery-operator:v0.6.11
           command: ["/volume-recovery-operator"]
           args:
             - --kubelet-dir=/var/lib/kubelet
