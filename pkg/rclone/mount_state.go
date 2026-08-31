@@ -115,8 +115,12 @@ func NewMountStateManager(nodeID string) (*MountStateManager, error) {
 	}, nil
 }
 
-func (sm *MountStateManager) makeSecretName(volumeID string) string {
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(volumeID)))[:secretHashLength]
+func (sm *MountStateManager) makeSecretName(volumeID, targetPath string) string {
+	identity := volumeID
+	if targetPath != "" {
+		identity += "\x00" + targetPath
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(identity)))[:secretHashLength]
 	return secretNamePrefix + hash
 }
 
@@ -202,7 +206,7 @@ func (sm *MountStateManager) SaveState(ctx context.Context, state *MountState) e
 }
 
 func (sm *MountStateManager) buildSecret(state *MountState) (*v1.Secret, error) {
-	secretName := sm.makeSecretName(state.VolumeID)
+	secretName := sm.makeSecretName(state.VolumeID, state.TargetPath)
 
 	paramsJSON, err := json.Marshal(state.MountParams)
 	if err != nil {
@@ -255,7 +259,7 @@ func (sm *MountStateManager) DeleteState(ctx context.Context, volumeID, targetPa
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	secretName := sm.makeSecretName(volumeID)
+	secretName := sm.makeSecretName(volumeID, targetPath)
 
 	err := sm.secrets.Delete(ctx, secretName, metav1.DeleteOptions{})
 	if err != nil && !errors.IsNotFound(err) {

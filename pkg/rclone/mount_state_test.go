@@ -59,15 +59,15 @@ func TestMountStateManagerMakeSecretName(t *testing.T) {
 	sm := &MountStateManager{}
 
 	volumeID := "pvc-12345678-abcd-efgh-ijkl-mnopqrstuvwx"
-	name1 := sm.makeSecretName(volumeID)
-	name2 := sm.makeSecretName(volumeID)
+	targetPath := "/var/lib/kubelet/pods/a/mount"
+	name1 := sm.makeSecretName(volumeID, targetPath)
+	name2 := sm.makeSecretName(volumeID, targetPath)
 
 	assert.Equal(t, name1, name2)
 	assert.True(t, len(name1) > len(secretNamePrefix))
 	assert.Equal(t, secretNamePrefix, name1[:len(secretNamePrefix)])
-
-	otherName := sm.makeSecretName("other-volume-id")
-	assert.NotEqual(t, name1, otherName)
+	assert.NotEqual(t, name1, sm.makeSecretName(volumeID, "/var/lib/kubelet/pods/b/mount"))
+	assert.NotEqual(t, name1, sm.makeSecretName("other-volume-id", targetPath))
 }
 
 func TestMountStateSecretIncludesStagingPath(t *testing.T) {
