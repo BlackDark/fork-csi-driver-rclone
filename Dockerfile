@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build on the builder host platform; cross-compile with GOARCH=$TARGETARCH.
+# Build once on the builder host; cross-compile release arches in this stage.
+# Do not use TARGETARCH here so the builder cache is shared across platforms.
 FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 ARG TARGETOS
-ARG TARGETARCH
 ARG RCLONE_BACKEND_MODE=all
 
 WORKDIR /workspace
@@ -36,22 +36,21 @@ ARG GIT_COMMIT
 ARG BUILD_DATE
 ARG DRIVER_VERSION=latest
 
-# Build
-# the GOARCH has not a default value to allow the binary be built according to the host where the command
-# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
-# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
-# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+# Cross-compile static binaries for all release arches in one builder invocation.
 RUN RCLONE_VERSION=$(awk '/^[[:space:]]+github\.com\/rclone\/rclone v/{print $2; exit}' go.mod | sed 's/^v//') && \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -a \
-    -ldflags="-X github.com/veloxpack/csi-driver-rclone/pkg/rclone.driverVersion=${DRIVER_VERSION} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.gitCommit=${GIT_COMMIT} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.buildDate=${BUILD_DATE} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.rcloneVersion=${RCLONE_VERSION} -s -w -extldflags '-static'" \
-    -trimpath \
-    -tags "netgo ${RCLONE_BACKEND_MODE}" \
-    -o rcloneplugin \
-    cmd/rcloneplugin/main.go
+    for arch in amd64 arm64; do \
+      CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${arch} \
+      go build -a \
+      -ldflags="-X github.com/veloxpack/csi-driver-rclone/pkg/rclone.driverVersion=${DRIVER_VERSION} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.gitCommit=${GIT_COMMIT} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.buildDate=${BUILD_DATE} -X github.com/veloxpack/csi-driver-rclone/pkg/rclone.rcloneVersion=${RCLONE_VERSION} -s -w -extldflags '-static'" \
+      -trimpath \
+      -tags "netgo ${RCLONE_BACKEND_MODE}" \
+      -o rcloneplugin.${arch} \
+      cmd/rcloneplugin/main.go; \
+    done
 
-# Runtime image for the target platform only (binary copied from builder).
+# Runtime image for the target platform only (matching binary copied from builder).
 FROM --platform=$TARGETPLATFORM registry.k8s.io/build-image/debian-base:bookworm-v1.0.8
+ARG TARGETARCH
 WORKDIR /
 
 # Install required dependencies
@@ -63,6 +62,6 @@ RUN printf '%s\n' \
     "# Allow rclone to use the --allow-other flag" \
     "user_allow_other" >> /etc/fuse.conf
 
-COPY --from=builder /workspace/rcloneplugin .
+COPY --from=builder /workspace/rcloneplugin.${TARGETARCH} /rcloneplugin
 
 ENTRYPOINT ["/rcloneplugin"]

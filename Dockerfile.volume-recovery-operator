@@ -1,7 +1,8 @@
 # Copyright 2025 Veloxpack.io
+# Build once on the builder host; cross-compile release arches in this stage.
+# Do not use TARGETARCH here so the builder cache is shared across platforms.
 FROM --platform=$BUILDPLATFORM golang:1.27.0 AS builder
 ARG TARGETOS
-ARG TARGETARCH
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
@@ -9,11 +10,14 @@ RUN go mod download
 COPY cmd/volume-recovery-operator/ cmd/volume-recovery-operator/
 COPY pkg/ pkg/
 
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -trimpath \
-    -o volume-recovery-operator \
-    cmd/volume-recovery-operator/main.go
+RUN for arch in amd64 arm64; do \
+      CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${arch} \
+      go build -trimpath \
+      -o volume-recovery-operator.${arch} \
+      cmd/volume-recovery-operator/main.go; \
+    done
 
-FROM registry.k8s.io/build-image/debian-base:bookworm-v1.0.7
-COPY --from=builder /workspace/volume-recovery-operator /volume-recovery-operator
+FROM --platform=$TARGETPLATFORM registry.k8s.io/build-image/debian-base:bookworm-v1.0.7
+ARG TARGETARCH
+COPY --from=builder /workspace/volume-recovery-operator.${TARGETARCH} /volume-recovery-operator
 ENTRYPOINT ["/volume-recovery-operator"]
