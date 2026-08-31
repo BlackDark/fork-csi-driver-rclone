@@ -431,7 +431,23 @@ func (r *Reconciler) markRecoveredLocked(pod *corev1.Pod, now time.Time) {
 	if r.lastRecovery == nil {
 		r.lastRecovery = map[string]time.Time{}
 	}
+	r.pruneExpiredRecoveriesLocked(now)
 	r.lastRecovery[RecoveryKey(pod)] = now
+}
+
+func (r *Reconciler) pruneExpiredRecoveries(now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneExpiredRecoveriesLocked(now)
+}
+
+func (r *Reconciler) pruneExpiredRecoveriesLocked(now time.Time) {
+	cutoff := now.Add(-r.cooldown)
+	for key, last := range r.lastRecovery {
+		if !last.After(cutoff) {
+			delete(r.lastRecovery, key)
+		}
+	}
 }
 
 func podUsesProvisionerVolume(

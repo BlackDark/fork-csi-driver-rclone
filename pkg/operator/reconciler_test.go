@@ -110,6 +110,18 @@ func TestIsRateLimited(t *testing.T) {
 	assert.False(t, r.isRateLimited(context.Background(), pod, now.Add(2*time.Hour)))
 }
 
+func TestPruneExpiredRecoveries(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	r := NewReconciler(fake.NewSimpleClientset(), "node-1", "rclone.csi.veloxpack.io")
+	r.cooldown = time.Hour
+	r.lastRecovery = map[string]time.Time{
+		"default/Pod/expired": now.Add(-time.Hour),
+		"default/Pod/recent":  now.Add(-time.Minute),
+	}
+
+	r.pruneExpiredRecoveries(now)
+	assert.Equal(t, map[string]time.Time{"default/Pod/recent": now.Add(-time.Minute)}, r.lastRecovery)
+}
 func TestReconcileStaleMountsLazyUmountsMissingPod(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
