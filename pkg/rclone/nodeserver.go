@@ -1267,7 +1267,7 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 	if ns.mountStateManager != nil {
 		if err := ns.mountStateManager.DeleteState(ctx, volumeID, targetPath); err != nil {
-			klog.Warningf("Failed to delete mount state for volume %s: %v", volumeID, err)
+			return nil, status.Errorf(codes.Internal, "delete mount state for volume %s: %v", volumeID, err)
 		}
 	}
 
