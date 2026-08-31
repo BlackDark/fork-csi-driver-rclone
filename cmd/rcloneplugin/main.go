@@ -21,7 +21,6 @@ import (
 	"flag"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -124,59 +123,39 @@ func main() {
 		syscall.SIGUSR2,
 	)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		driver.Run(false)
-	}()
+	go driver.Run(false)
 
-	sig := <-sigChan
-	klog.Infof("Received signal: %v", sig)
-
-	switch sig {
-	case syscall.SIGTERM, syscall.SIGINT:
-		klog.Infof("Starting graceful shutdown...")
-
-		shutdownCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		defer cancel()
-
-		if metricsSrv != nil {
-			klog.V(2).Info("Shutting down metrics server...")
-			metricsShutdownCtx, metricsCancel := context.WithTimeout(ctx, 5*time.Second)
-			defer metricsCancel()
-			if err := metricsSrv.Shutdown(metricsShutdownCtx); err != nil {
-				klog.Errorf("Error shutting down metrics server: %v", err)
+	for sig := range sigChan {
+		klog.Infof("Received signal: %v", sig)
+		switch sig {
+		case syscall.SIGTERM, syscall.SIGINT:
+			shutdownCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+			if metricsSrv != nil {
+				metricsCtx, metricsCancel := context.WithTimeout(ctx, 5*time.Second)
+				if err := metricsSrv.Shutdown(metricsCtx); err != nil {
+					klog.Errorf("Error shutting down metrics server: %v", err)
+				}
+				metricsCancel()
+			}
+			if rcSrv != nil {
+				if err := rcSrv.Shutdown(); err != nil {
+					klog.Errorf("Error shutting down RC server: %v", err)
+				}
+			}
+			err := driver.Shutdown(shutdownCtx)
+			cancel()
+			if err != nil {
+				klog.Errorf("Error during driver shutdown: %v", err)
+				return
+			}
+			klog.Info("Graceful shutdown completed")
+			return
+		case syscall.SIGUSR1:
+			driver.DumpMountInfo()
+		case syscall.SIGUSR2:
+			if err := driver.ForceCacheSync(ctx); err != nil {
+				klog.Errorf("Cache sync failed: %v", err)
 			}
 		}
-
-		if rcSrv != nil {
-			klog.V(2).Info("Shutting down RC server...")
-			if err := rcSrv.Shutdown(); err != nil {
-				klog.Errorf("Error shutting down RC server: %v", err)
-			}
-		}
-
-		if err := driver.Shutdown(shutdownCtx); err != nil {
-			klog.Errorf("Error during driver shutdown: %v", err)
-			os.Exit(1)
-		}
-
-		klog.Info("Graceful shutdown completed")
-		os.Exit(0)
-
-	case syscall.SIGUSR1:
-		klog.Info("=== MOUNT STATUS DUMP (SIGUSR1) ===")
-		driver.DumpMountInfo()
-		wg.Wait()
-
-	case syscall.SIGUSR2:
-		klog.Info("=== FORCING CACHE SYNC (SIGUSR2) ===")
-		if err := driver.ForceCacheSync(ctx); err != nil {
-			klog.Errorf("Cache sync failed: %v", err)
-		} else {
-			klog.Info("Cache sync completed successfully")
-		}
-		wg.Wait()
 	}
 }
