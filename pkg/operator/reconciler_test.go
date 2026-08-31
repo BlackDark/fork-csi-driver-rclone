@@ -17,12 +17,15 @@ limitations under the License.
 package operator
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestShouldSkipPod(t *testing.T) {
@@ -100,4 +103,46 @@ func TestIsRateLimited(t *testing.T) {
 		},
 	}
 	assert.True(t, IsRateLimited(podInvalid, now, cooldown))
+}
+
+func TestReconcileStaleMountsLazyUmountsMissingPod(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(true)
+
+	var umounted []string
+	r.lazyUmount = func(path string) error {
+		umounted = append(umounted, path)
+		return nil
+	}
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID:     "dead-uid",
+		VolumeName: "data",
+		MountPath:  "/var/lib/kubelet/pods/dead-uid/volumes/kubernetes.io~csi/data/mount",
+	}})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"/var/lib/kubelet/pods/dead-uid/volumes/kubernetes.io~csi/data/mount",
+	}, umounted)
+}
+
+func TestReconcileStaleMountsSkipsLazyUmountWhenDisabled(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(false)
+
+	called := false
+	r.lazyUmount = func(string) error {
+		called = true
+		return nil
+	}
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID:     "dead-uid",
+		VolumeName: "data",
+		MountPath:  "/mnt/orphan",
+	}})
+	require.NoError(t, err)
+	assert.False(t, called)
 }

@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/veloxpack/csi-driver-rclone/pkg/rclone"
 	"k8s.io/klog/v2"
@@ -34,6 +35,18 @@ const (
 
 // mountPathCorruptedProbe is overridable in tests.
 var mountPathCorruptedProbe = rclone.IsMountPathCorrupted
+
+// ConfigureMountProbe sets the mount health probe used by ScanStaleMounts.
+// A positive timeout wraps IsMountPathCorruptedWithTimeout; non-positive restores unbounded.
+func ConfigureMountProbe(timeout time.Duration) {
+	if timeout <= 0 {
+		mountPathCorruptedProbe = rclone.IsMountPathCorrupted
+		return
+	}
+	mountPathCorruptedProbe = func(path string) (bool, string) {
+		return rclone.IsMountPathCorruptedWithTimeout(path, timeout)
+	}
+}
 
 // StaleMount describes an unhealthy CSI mount discovered on the node.
 type StaleMount struct {

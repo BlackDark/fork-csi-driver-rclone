@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,4 +130,59 @@ func TestScanStaleMountsDetectsCorruptedDirectoryMount(t *testing.T) {
 	assert.Equal(t, podUID, stale[0].PodUID)
 	assert.Equal(t, volumeName, stale[0].VolumeName)
 	assert.Equal(t, mountPath, stale[0].MountPath)
+}
+
+func TestScanStaleMountsHungProbeDoesNotBlockForever(t *testing.T) {
+	kubeletDir := t.TempDir()
+	mountPath := filepath.Join(kubeletDir, "pods", "hung-pod", "volumes", "kubernetes.io~csi", "data", "mount")
+	require.NoError(t, os.MkdirAll(mountPath, 0o755))
+
+	oldProbe := mountPathCorruptedProbe
+	mountPathCorruptedProbe = func(string) (bool, string) {
+		type result struct {
+			corrupted bool
+			reason    string
+		}
+		ch := make(chan result, 1)
+		go func() {
+			time.Sleep(10 * time.Second)
+			ch <- result{}
+		}()
+		select {
+		case res := <-ch:
+			return res.corrupted, res.reason
+		case <-time.After(40 * time.Millisecond):
+			return true, "mount probe timed out after 40ms"
+		}
+	}
+	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
+
+	start := time.Now()
+	stale, err := ScanStaleMounts(kubeletDir, mount.New(""))
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.Len(t, stale, 1)
+	assert.Equal(t, mountPath, stale[0].MountPath)
+	assert.Less(t, elapsed, 2*time.Second)
+}
+
+func TestScanStaleMountsPreservesSkipDir(t *testing.T) {
+	kubeletDir := t.TempDir()
+	mountPath := filepath.Join(kubeletDir, "pods", "skip-pod", "volumes", "kubernetes.io~csi", "data", "mount")
+	nested := filepath.Join(mountPath, "nested", "deep")
+	require.NoError(t, os.MkdirAll(nested, 0o755))
+
+	var probed []string
+	oldProbe := mountPathCorruptedProbe
+	mountPathCorruptedProbe = func(path string) (bool, string) {
+		probed = append(probed, path)
+		return false, ""
+	}
+	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
+
+	stale, err := ScanStaleMounts(kubeletDir, mount.New(""))
+	require.NoError(t, err)
+	assert.Empty(t, stale)
+	require.Len(t, probed, 1)
+	assert.Equal(t, mountPath, probed[0])
 }

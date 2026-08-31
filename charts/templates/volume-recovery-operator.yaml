@@ -77,6 +77,8 @@ spec:
             - --csi-restart-recovery={{ .Values.volumeRecoveryOperator.csiRestartRecovery }}
             - --csi-node-label={{ default (printf "app=%s" .Values.node.name) .Values.volumeRecoveryOperator.csiNodeLabel }}
             - --csi-restart-ready-timeout={{ .Values.volumeRecoveryOperator.csiRestartReadyTimeout }}
+            - --mount-probe-timeout={{ .Values.volumeRecoveryOperator.mountProbeTimeout }}
+            - --orphan-lazy-umount={{ .Values.volumeRecoveryOperator.orphanLazyUmount }}
             - --v={{ .Values.volumeRecoveryOperator.logLevel }}
           env:
             - name: NODE_NAME
@@ -92,7 +94,8 @@ spec:
           volumeMounts:
             - name: kubelet-pods
               mountPath: {{ .Values.kubeletDir }}/pods
-              readOnly: true
+              readOnly: false
+              mountPropagation: HostToContainer
           resources:
             {{- toYaml .Values.volumeRecoveryOperator.resources | nindent 12 }}
       volumes:

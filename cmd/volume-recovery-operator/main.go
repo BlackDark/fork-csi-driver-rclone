@@ -41,10 +41,21 @@ var (
 		"csi-node-label", operator.DefaultCSINodeLabelSelector(),
 		"Label selector for CSI node pods",
 	)
-	csiRestartRecovery     = flag.Bool("csi-restart-recovery", true, "Restart workload pods when the CSI node pod restarts")
+	csiRestartRecovery = flag.Bool(
+		"csi-restart-recovery", true,
+		"Restart workload pods when the CSI node pod restarts",
+	)
 	csiRestartReadyTimeout = flag.Duration(
 		"csi-restart-ready-timeout", operator.DefaultCSIRestartReadyTimeout(),
 		"Max wait for CSI node pod Ready after a restart before deleting workloads",
+	)
+	mountProbeTimeout = flag.Duration(
+		"mount-probe-timeout", 3*time.Second,
+		"Max wait for mount health probe; timeout is treated as corrupted",
+	)
+	orphanLazyUmount = flag.Bool(
+		"orphan-lazy-umount", true,
+		"Lazy-umount stale CSI publish paths when the pod UID is gone from the node",
 	)
 )
 
@@ -72,6 +83,9 @@ func main() {
 
 	mounter := mount.New("" /* mounterPath */)
 	reconciler := operator.NewReconciler(client, *nodeName, *provisioner)
+	reconciler.SetOrphanLazyUmount(*orphanLazyUmount)
+	reconciler.SetMountProbeTimeout(*mountProbeTimeout)
+	operator.ConfigureMountProbe(*mountProbeTimeout)
 	csiTracker := operator.NewCSINodeTracker(client, *nodeName, *csiNodeLabel)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -84,46 +98,48 @@ func main() {
 		"scanInterval", *scanInterval,
 		"csiNodeLabel", *csiNodeLabel,
 		"csiRestartRecovery", *csiRestartRecovery,
-		"csiRestartReadyTimeout", *csiRestartReadyTimeout)
+		"csiRestartReadyTimeout", *csiRestartReadyTimeout,
+		"mountProbeTimeout", *mountProbeTimeout,
+		"orphanLazyUmount", *orphanLazyUmount)
 
-	ticker := time.NewTicker(*scanInterval)
-	defer ticker.Stop()
-
-	runScan := func() {
-		if *csiRestartRecovery {
+	var onCSI func(context.Context)
+	if *csiRestartRecovery {
+		onCSI = func(ctx context.Context) {
 			restarted, err := csiTracker.CheckRestarted(ctx)
 			if err != nil {
 				klog.ErrorS(err, "CSI node restart check failed")
-			} else if restarted {
-				if err := csiTracker.WaitUntilReady(ctx, *csiRestartReadyTimeout); err != nil {
-					klog.ErrorS(err, "waiting for CSI node Ready failed; skipping CSI restart recovery")
-				} else if err := reconciler.ReconcileWorkloadPodsAfterCSIRestart(ctx); err != nil {
-					klog.ErrorS(err, "CSI restart workload recovery failed")
-				}
+				return
+			}
+			if !restarted {
+				return
+			}
+			if err := csiTracker.WaitUntilReady(ctx, *csiRestartReadyTimeout); err != nil {
+				klog.ErrorS(err, "waiting for CSI node Ready failed; skipping CSI restart recovery")
+				return
+			}
+			if err := reconciler.ReconcileWorkloadPodsAfterCSIRestart(ctx); err != nil {
+				klog.ErrorS(err, "CSI restart workload recovery failed")
 			}
 		}
-
-		stale, err := operator.ScanStaleMounts(*kubeletDir, mounter)
-		if err != nil {
-			klog.ErrorS(err, "stale mount scan failed")
-			return
-		}
-		if len(stale) > 0 {
-			klog.InfoS("stale mounts detected", "count", len(stale))
-		}
-		if err := reconciler.ReconcileStaleMounts(ctx, stale); err != nil {
-			klog.ErrorS(err, "stale mount reconciliation failed")
-		}
 	}
 
-	runScan()
-	for {
-		select {
-		case <-ctx.Done():
-			klog.Info("volume recovery operator shutting down")
-			return
-		case <-ticker.C:
-			runScan()
-		}
+	loops := operator.RecoveryLoops{
+		Interval: *scanInterval,
+		OnCSI:    onCSI,
+		OnScan: func(ctx context.Context) {
+			stale, err := operator.ScanStaleMounts(*kubeletDir, mounter)
+			if err != nil {
+				klog.ErrorS(err, "stale mount scan failed")
+				return
+			}
+			if len(stale) > 0 {
+				klog.InfoS("stale mounts detected", "count", len(stale))
+			}
+			if err := reconciler.ReconcileStaleMounts(ctx, stale); err != nil {
+				klog.ErrorS(err, "stale mount reconciliation failed")
+			}
+		},
 	}
+	loops.Run(ctx)
+	klog.Info("volume recovery operator shutting down")
 }

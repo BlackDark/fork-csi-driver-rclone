@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	mount "k8s.io/mount-utils"
 )
@@ -28,6 +29,8 @@ import (
 var errMountAlreadyHealthy = errors.New("mount already healthy")
 
 // IsMountPathCorrupted reports whether a mount path has a stale/broken FUSE endpoint.
+// This call can block indefinitely on a hung FUSE endpoint; operator code should prefer
+// IsMountPathCorruptedWithTimeout.
 func IsMountPathCorrupted(path string) (bool, string) {
 	_, err := os.ReadDir(path)
 	if err == nil {
@@ -37,6 +40,39 @@ func IsMountPathCorrupted(path string) (bool, string) {
 		return true, fmt.Sprintf("mount point corrupted: %v", err)
 	}
 	return false, ""
+}
+
+// IsMountPathCorruptedWithTimeout is like IsMountPathCorrupted but treats a probe that
+// exceeds timeout as corrupted. A non-positive timeout falls back to the unbounded probe.
+// On timeout the underlying ReadDir goroutine may remain blocked (uninterruptible FUSE I/O).
+func IsMountPathCorruptedWithTimeout(path string, timeout time.Duration) (bool, string) {
+	return probeMountPathWithTimeout(path, timeout, IsMountPathCorrupted)
+}
+
+// probeMountPathWithTimeout runs probe with a deadline; timeout → corrupted.
+func probeMountPathWithTimeout(
+	path string, timeout time.Duration, probe func(string) (bool, string),
+) (bool, string) {
+	if timeout <= 0 {
+		return probe(path)
+	}
+
+	type result struct {
+		corrupted bool
+		reason    string
+	}
+	ch := make(chan result, 1)
+	go func() {
+		corrupted, reason := probe(path)
+		ch <- result{corrupted: corrupted, reason: reason}
+	}()
+
+	select {
+	case res := <-ch:
+		return res.corrupted, res.reason
+	case <-time.After(timeout):
+		return true, fmt.Sprintf("mount probe timed out after %s", timeout)
+	}
 }
 
 // IsMountPathHealthy checks whether a mount path is accessible via ReadDir.

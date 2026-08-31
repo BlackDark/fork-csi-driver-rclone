@@ -91,7 +91,7 @@ The optional **volume recovery operator** is a node-local DaemonSet that complem
 - Workloads **without** `mountPropagation: HostToContainer` cannot see a remounted kubelet path until the pod is recreated.
 - After CSI driver OOM/restart, app containers may still hold dead FUSE file descriptors even when the kubelet mount is healthy.
 
-The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node (directory publish targets included), reuses `IsMountPathCorrupted` from the driver, and deletes affected workload pods so controllers recreate them.
+The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node (directory publish targets included), probes mount health with a **bounded timeout** (default 3s; timeout treated as corrupted), and deletes affected workload pods so controllers recreate them. CSI-UID restart recovery and the stale-mount scan run on **independent loops** so an orphan/hung FUSE probe cannot starve CSI restart detection. When a stale publish path's pod UID is gone, the operator can **lazy-umount** it (`MNT_DETACH`, default on).
 
 When Phase B remount + skip-bind-refresh keeps kubelet/staging healthy while container binds stay stale, the operator is **required** for automated recovery. It watches for **CSI node pod restarts** on the same node, waits until the new CSI node pod is Ready (default 90s, then proceeds), and restarts workload pods that use rclone volumes. Container bind mounts cannot be refreshed in-place without `mountPropagation` or a pod restart.
 
@@ -100,6 +100,8 @@ When Phase B remount + skip-bind-refresh keeps kubelet/staging healthy while con
 - Skips `kube-system`, pods named `*csi-rclone*`, and pods owned by the CSI DaemonSet
 - Rate limit: one recovery delete per pod per hour via `volume.veloxpack.io/last-recovery`
 - Only volumes backed by `rclone.csi.veloxpack.io` are acted on
+- Mount probe timeout avoids permanent wedging on zombie `fuse.rclone` under deleted pod UIDs
+- Orphan lazy-umount only when the pod UID is absent from the node (never staging `globalmount`)
 
 ### Deploy
 
@@ -111,6 +113,8 @@ volumeRecoveryOperator:
   csiRestartRecovery: true   # default
   # csiNodeLabel: ""         # empty → app=<node.name>
   # csiRestartReadyTimeout: 90s
+  # mountProbeTimeout: 3s
+  # orphanLazyUmount: true
 ```
 
 Or apply the kustomize manifests:

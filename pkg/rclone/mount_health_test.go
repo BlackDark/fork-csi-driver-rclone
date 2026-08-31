@@ -20,10 +20,48 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	mount "k8s.io/mount-utils"
 )
+
+func TestIsMountPathCorruptedWithTimeout(t *testing.T) {
+	t.Run("hung probe returns within timeout", func(t *testing.T) {
+		start := time.Now()
+		corrupted, reason := probeMountPathWithTimeout("/unused", 50*time.Millisecond, func(string) (bool, string) {
+			time.Sleep(5 * time.Second)
+			return false, ""
+		})
+		elapsed := time.Since(start)
+		assert.True(t, corrupted)
+		assert.Contains(t, reason, "timed out")
+		assert.Less(t, elapsed, 2*time.Second)
+	})
+
+	t.Run("fast corrupt result", func(t *testing.T) {
+		corrupted, reason := probeMountPathWithTimeout("/p", time.Second, func(string) (bool, string) {
+			return true, "mount point corrupted: transport endpoint is not connected"
+		})
+		assert.True(t, corrupted)
+		assert.Contains(t, reason, "transport endpoint")
+	})
+
+	t.Run("non-positive timeout uses unbounded probe", func(t *testing.T) {
+		corrupted, reason := probeMountPathWithTimeout("/p", 0, func(string) (bool, string) {
+			return false, ""
+		})
+		assert.False(t, corrupted)
+		assert.Empty(t, reason)
+	})
+
+	t.Run("healthy path", func(t *testing.T) {
+		dir := t.TempDir()
+		corrupted, reason := IsMountPathCorruptedWithTimeout(dir, time.Second)
+		assert.False(t, corrupted)
+		assert.Empty(t, reason)
+	})
+}
 
 func TestIsMountPathHealthy(t *testing.T) {
 	mounter, err := NewFakeMounter()

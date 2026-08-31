@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/veloxpack/csi-driver-rclone/pkg/rclone"
@@ -43,6 +44,9 @@ type Reconciler struct {
 	provisioner      string
 	cooldown         time.Duration
 	confirmCorrupted func(path string) (bool, string)
+	orphanLazyUmount bool
+	lazyUmount       func(path string) error // overridable in tests
+	mu               sync.Mutex              // serializes pod deletes across CSI + scan loops
 }
 
 // NewReconciler builds a node-local pod reconciler.
@@ -52,6 +56,24 @@ func NewReconciler(client kubernetes.Interface, nodeName, provisioner string) *R
 		nodeName:    nodeName,
 		provisioner: provisioner,
 		cooldown:    defaultRecoveryCooldown,
+		lazyUmount:  LazyUmount,
+	}
+}
+
+// SetOrphanLazyUmount enables lazy-umount of stale CSI publish paths whose pod UID is gone.
+func (r *Reconciler) SetOrphanLazyUmount(enabled bool) {
+	r.orphanLazyUmount = enabled
+}
+
+// SetMountProbeTimeout sets the confirm probe used before pod restart.
+// A positive timeout uses IsMountPathCorruptedWithTimeout; non-positive restores default.
+func (r *Reconciler) SetMountProbeTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		r.confirmCorrupted = nil
+		return
+	}
+	r.confirmCorrupted = func(path string) (bool, string) {
+		return rclone.IsMountPathCorruptedWithTimeout(path, timeout)
 	}
 }
 
@@ -85,7 +107,7 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 	for _, mount := range stale {
 		pod, ok := byUID[mount.PodUID]
 		if !ok {
-			klog.V(4).InfoS("stale mount pod not found on node", "podUID", mount.PodUID, "path", mount.MountPath)
+			r.maybeLazyUmountOrphan(mount)
 			continue
 		}
 
@@ -127,6 +149,22 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 	}
 
 	return nil
+}
+
+func (r *Reconciler) maybeLazyUmountOrphan(mount StaleMount) {
+	klog.V(4).InfoS("stale mount pod not found on node", "podUID", mount.PodUID, "path", mount.MountPath)
+	if !ShouldLazyUmountOrphan(r.orphanLazyUmount, false) {
+		return
+	}
+	umount := r.lazyUmount
+	if umount == nil {
+		umount = LazyUmount
+	}
+	if err := umount(mount.MountPath); err != nil {
+		klog.ErrorS(err, "orphan lazy umount failed", "podUID", mount.PodUID, "path", mount.MountPath)
+		return
+	}
+	klog.InfoS("lazy-umounted orphan CSI mount", "podUID", mount.PodUID, "path", mount.MountPath)
 }
 
 // ReconcileWorkloadPodsAfterCSIRestart restarts workload pods using rclone volumes after a CSI node restart.
@@ -194,6 +232,9 @@ func podHasProvisionerVolume(
 }
 
 func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	pod = pod.DeepCopy()
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}

@@ -59,6 +59,10 @@ volumeRecoveryOperator:
   csiNodeLabel: ""
   # Max wait for CSI node Ready after restart before deleting workloads.
   csiRestartReadyTimeout: 90s
+  # Max wait for mount health probe; timeout is treated as corrupted (operator only).
+  mountProbeTimeout: 3s
+  # Lazy-umount stale CSI publish paths when the pod UID is gone from the node.
+  orphanLazyUmount: true
   provisioner: rclone.csi.veloxpack.io
   logLevel: 2
   image:

@@ -72,6 +72,8 @@ spec:
             - --csi-restart-recovery=true
             - --csi-node-label=app=csi-rclone-node
             - --csi-restart-ready-timeout=90s
+            - --mount-probe-timeout=3s
+            - --orphan-lazy-umount=true
             - --v=2
           env:
             - name: NODE_NAME
@@ -87,7 +89,8 @@ spec:
           volumeMounts:
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
-              readOnly: true
+              readOnly: false
+              mountPropagation: HostToContainer
           resources:
             requests:
               cpu: 10m
