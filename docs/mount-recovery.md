@@ -91,7 +91,23 @@ The optional **volume recovery operator** is a node-local DaemonSet that complem
 - Workloads **without** `mountPropagation: HostToContainer` cannot see a remounted kubelet path until the pod is recreated.
 - After CSI driver OOM/restart, app containers may still hold dead FUSE file descriptors even when the kubelet mount is healthy.
 
-The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node (directory publish targets included), keeps only volumes for this driver's provisioner (kubelet `vol_data.json`, with a `fuse.rclone` fallback when that file is missing), probes mount health with a **bounded timeout** (default 3s; timeout treated as corrupted), and deletes affected workload pods so controllers recreate them. Before each delete it records a Warning Event on the **controller owner** and sets `volume.veloxpack.io/last-recovery` on that owner (ReplicaSet/StatefulSet/DaemonSet/Job). It does **not** annotate the dying Pod. Best-effort, it annotates the **replacement** Pod after recreate. Cooldown also uses in-memory owner keys. Concurrent deletes that hit `NotFound` are treated as already done. CSI-UID restart recovery and the stale-mount scan run on **independent loops** so an orphan/hung FUSE probe cannot starve CSI restart detection. When a stale publish path's pod UID is gone, the operator can **lazy-umount** it (`MNT_DETACH`, default on), then **abort** that path's FUSE connection and **best-effort kill** a hung mount server so CSI node teardown is not wedged by residual userspace FUSE. The operator mounts kubelet-pods with `mountPropagation: Bidirectional` so that lazy-umount clears the host mount table (`HostToContainer` alone does not), uses `hostPID: true` for kill visibility, and mounts host `/sys/fs/fuse` RW for abort.
+The operator periodically scans CSI publish paths on each node. It retains only volumes for this
+driver (kubelet `vol_data.json`, with a `fuse.rclone` fallback), probes mount health with a bounded
+three-second timeout, then deletes affected workload pods so controllers recreate them. It records a
+Warning Event on the controller owner before deletion. After a successful delete it sets
+`volume.veloxpack.io/last-recovery` on that owner and, best-effort, on the replacement Pod.
+It does not annotate the dying Pod. Cooldown also uses in-memory owner keys. Concurrent deletes that
+hit `NotFound` are treated as already done. CSI-UID restart recovery and stale-mount scans run on
+independent loops so an orphan or hung FUSE probe cannot starve restart detection.
+
+At most one timed probe can wait on uninterruptible FUSE I/O. While it is occupied, later mounts
+are skipped until the next scan instead of being treated as corrupted.
+
+When a stale publish path's pod UID is gone, the operator can lazy-umount it (`MNT_DETACH`, default
+on), then abort that FUSE connection only when it has no remaining mount and best-effort kill a hung
+mount server so CSI node teardown is not wedged by residual userspace FUSE. The operator mounts
+kubelet-pods with `mountPropagation: Bidirectional` so lazy-umount clears the host mount table,
+uses `hostPID: true` for kill visibility, and mounts host `/sys/fs/fuse` RW for abort.
 
 When Phase B remount + skip-bind-refresh keeps kubelet/staging healthy while container binds stay stale, the operator is **required** for automated recovery. It watches for **CSI node pod restarts** on the same node, waits until the new CSI node pod is Ready (default 90s, then proceeds), and restarts workload pods that use rclone volumes. Container bind mounts cannot be refreshed in-place without `mountPropagation` or a pod restart.
 
