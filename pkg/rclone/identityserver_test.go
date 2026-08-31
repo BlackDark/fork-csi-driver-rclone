@@ -143,13 +143,6 @@ func TestGetPluginCapabilities(t *testing.T) {
 				},
 			},
 		},
-		{
-			Type: &csi.PluginCapability_VolumeExpansion_{
-				VolumeExpansion: &csi.PluginCapability_VolumeExpansion{
-					Type: csi.PluginCapability_VolumeExpansion_ONLINE,
-				},
-			},
-		},
 	}
 
 	d := NewEmptyDriver("")
@@ -190,21 +183,15 @@ func TestGetPluginCapabilitiesWithMultipleDrivers(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, resp)
 			assert.NotNil(t, resp.Capabilities)
-			assert.Equal(t, 2, len(resp.Capabilities))
+			assert.Len(t, resp.Capabilities, 1)
 
-			// Verify it has the CONTROLLER_SERVICE capability
 			hasControllerService := false
-			hasVolumeExpansion := false
 			for _, cap := range resp.Capabilities {
 				if cap.GetService() != nil && cap.GetService().Type == csi.PluginCapability_Service_CONTROLLER_SERVICE {
 					hasControllerService = true
 				}
-				if cap.GetVolumeExpansion() != nil && cap.GetVolumeExpansion().Type == csi.PluginCapability_VolumeExpansion_ONLINE {
-					hasVolumeExpansion = true
-				}
 			}
 			assert.True(t, hasControllerService, "Should have CONTROLLER_SERVICE capability")
-			assert.True(t, hasVolumeExpansion, "Should have ONLINE volume expansion capability")
 		})
 	}
 }

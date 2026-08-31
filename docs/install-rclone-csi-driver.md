@@ -112,7 +112,6 @@ parameters:
   remotePath: "my-bucket"
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
-allowVolumeExpansion: true
 ```
 
 ### 2. Create Secret (Optional)
