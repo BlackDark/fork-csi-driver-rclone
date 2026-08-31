@@ -76,15 +76,13 @@ func TestProbeMountPathWithTimeoutLimitsHungProbes(t *testing.T) {
 		return false, ""
 	}
 
-	firstDone := make(chan struct{})
 	go func() {
 		probeMountPathWithTimeout("/first", 20*time.Millisecond, probe)
-		close(firstDone)
 	}()
 	<-started
-	<-firstDone
+	corrupted, _ := probeMountPathWithTimeout("/second", 20*time.Millisecond, probe)
+	assert.False(t, corrupted)
 
-	probeMountPathWithTimeout("/second", 20*time.Millisecond, probe)
 	select {
 	case <-started:
 		t.Fatal("second hung probe started instead of respecting the concurrency limit")

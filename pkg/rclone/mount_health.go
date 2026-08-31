@@ -67,7 +67,7 @@ func probeMountPathWithTimeout(
 	select {
 	case timedMountProbeSlots <- struct{}{}:
 	case <-timer.C:
-		return true, fmt.Sprintf("mount probe timed out after %s", timeout)
+		return false, fmt.Sprintf("mount probe unavailable after %s", timeout)
 	}
 
 	type result struct {
