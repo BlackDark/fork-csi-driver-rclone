@@ -538,15 +538,14 @@ func (ns *NodeServer) cleanupConfigRemotes(remotes []string) {
 
 // createAndMountFilesystem initializes and mounts the rclone filesystem
 func (ns *NodeServer) createAndMountFilesystem(
+	ctx context.Context,
 	fsPath, targetPath string,
 	mountOptions []string,
 	params map[string]string,
 ) (*mountlib.MountPoint, context.Context, context.CancelFunc, error) {
-	// Per-mount context for config isolation and driver-owned cleanup.
-	// NewFs uses WithoutCancel below so OAuth/token refresh is not tied to
-	// this cancel (unpublish must not kill shared or reused Fs contexts).
-	// See https://github.com/veloxpack/csi-driver-rclone/issues/54
-	mountCtx, cancel := context.WithCancel(context.TODO())
+	// The caller owns the mount context. It is cancelled on a timed-out attempt
+	// and retained by the mount context after success for unpublish cleanup.
+	mountCtx, cancel := context.WithCancel(ctx)
 
 	// Create per-mount context with isolated config
 	mountCtx, ci := fs.AddConfig(mountCtx)
@@ -572,7 +571,7 @@ func (ns *NodeServer) createAndMountFilesystem(
 	}
 
 	// Config values come from mountCtx; lifetime of Fs/OAuth must outlive cancel.
-	rcloneFs, err := fs.NewFs(context.WithoutCancel(mountCtx), fsPath)
+	rcloneFs, err := fs.NewFs(mountCtx, fsPath)
 	if err != nil {
 		cancel()
 		return nil, nil, nil, status.Errorf(codes.Internal, "failed to initialize filesystem: %v", err)
@@ -1062,9 +1061,12 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 	// never fire and every kubelet retry would get Aborted forever (issue #86).
 	// The channel is buffered (cap 1) so the goroutine's send never blocks even after
 	// this handler has returned on the timeout/cancel path.
+	attemptCtx, cancelAttempt := context.WithCancel(context.Background())
 	resultCh := make(chan mountResult, 1)
 	go func() {
-		mp, mctx, cancel, err := ns.createAndMountFilesystem(fsPath, targetPath, mountOptions, pvp.params)
+		mp, mctx, cancel, err := ns.createAndMountFilesystem(
+			attemptCtx, fsPath, targetPath, mountOptions, pvp.params,
+		)
 		resultCh <- mountResult{mountPoint: mp, mountCtx: mctx, cancel: cancel, err: err}
 	}()
 
@@ -1117,6 +1119,7 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 		// loaded remotes, and the lock to the reaper so we return promptly and the
 		// lock is always eventually released. Return Aborted (retriable by kubelet).
 		handOff = true
+		cancelAttempt()
 		klog.Warningf("NodePublishVolume for %s timed out after %s; reaping mount in background", targetPath, ns.mountTimeout())
 		go ns.reapOrphanMount(resultCh, targetPath, remotes, lockKey)
 		return nil, status.Errorf(codes.Aborted, volumeOperationAlreadyExistsFmt, volumeID)
@@ -1124,6 +1127,7 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 	case <-ctx.Done():
 		// kubelet cancelled/deadlined the RPC before our own timeout. Same hand-off.
 		handOff = true
+		cancelAttempt()
 		klog.Warningf("NodePublishVolume for %s cancelled by caller (%v); reaping mount in background", targetPath, ctx.Err())
 		go ns.reapOrphanMount(resultCh, targetPath, remotes, lockKey)
 		return nil, status.FromContextError(ctx.Err()).Err()

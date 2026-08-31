@@ -298,5 +298,5 @@ func (ns *NodeServer) mountRcloneFilesystem(
 	if ns.mountFilesystem != nil {
 		return ns.mountFilesystem(fsPath, targetPath, mountOptions, params)
 	}
-	return ns.createAndMountFilesystem(fsPath, targetPath, mountOptions, params)
+	return ns.createAndMountFilesystem(context.Background(), fsPath, targetPath, mountOptions, params)
 }
