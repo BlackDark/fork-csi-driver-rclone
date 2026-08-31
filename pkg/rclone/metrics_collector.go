@@ -19,6 +19,7 @@ package rclone
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -311,23 +312,19 @@ func (c *csiRcloneCollector) collectVFSMetrics(ch chan<- prometheus.Metric) {
 	}
 
 	c.nodeServer.mu.RLock()
-	defer c.nodeServer.mu.RUnlock()
+	mountContexts := maps.Clone(c.nodeServer.mountContext)
+	c.nodeServer.mu.RUnlock()
 
-	// Aggregate metrics by volume_id
-	volumeStats := c.aggregateVolumeStats()
-
-	// Emit aggregated VFS metrics
+	volumeStats := c.aggregateVolumeStats(mountContexts)
 	c.emitVolumeMetrics(ch, volumeStats)
-
-	// Emit mount health metrics
-	c.collectMountHealthMetrics(ch)
+	c.collectMountHealthMetrics(ch, mountContexts)
 }
 
 // aggregateVolumeStats aggregates VFS statistics across all mount points by volume ID
-func (c *csiRcloneCollector) aggregateVolumeStats() map[string]*volumeMetrics {
+func (c *csiRcloneCollector) aggregateVolumeStats(mountContexts map[string]*mountContext) map[string]*volumeMetrics {
 	volumeStats := make(map[string]*volumeMetrics)
 
-	for targetPath, mc := range c.nodeServer.mountContext {
+	for targetPath, mc := range mountContexts {
 		if mc == nil || mc.mountPoint == nil || mc.mountPoint.VFS == nil {
 			continue
 		}
@@ -440,9 +437,10 @@ func (c *csiRcloneCollector) emitSingleVolumeMetrics(ch chan<- prometheus.Metric
 	)
 }
 
-// collectMountHealthMetrics emits mount health status for each mount point
-func (c *csiRcloneCollector) collectMountHealthMetrics(ch chan<- prometheus.Metric) {
-	for targetPath, mc := range c.nodeServer.mountContext {
+func (c *csiRcloneCollector) collectMountHealthMetrics(
+	ch chan<- prometheus.Metric, mountContexts map[string]*mountContext,
+) {
+	for targetPath, mc := range mountContexts {
 		if mc == nil || mc.mountPoint == nil {
 			continue
 		}
