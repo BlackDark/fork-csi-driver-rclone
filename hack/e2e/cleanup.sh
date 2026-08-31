@@ -8,16 +8,41 @@ NS="${NS:-csi-rclone-e2e}"
 RELEASE="${RELEASE:-csi-rclone-e2e}"
 DRIVER_NS="${DRIVER_NS:-$NS}"
 
+delete_e2e_workloads() {
+  kubectl delete deploy e2e-writer e2e-writer-propagated minio -n "$NS" \
+    --ignore-not-found --cascade=foreground --wait=true --timeout=2m
+  kubectl delete pod e2e-bad-creds-pod -n "$NS" \
+    --ignore-not-found --wait=true --timeout=2m
+  kubectl delete ds volume-recovery-operator -n "$NS" \
+    --ignore-not-found --cascade=foreground --wait=true --timeout=2m
+}
+
+wait_for_pvs() {
+  local deadline=$((SECONDS + 120))
+  while kubectl get pv -o json | jq -e --arg ns "$NS" \
+    '.items[] | select(.spec.claimRef.namespace == $ns)' >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      echo "timed out waiting for test PV teardown; CSI remains installed" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 echo "==> delete workloads first (while CSI can unmount)"
-kubectl delete deploy,sts,ds,job,pod --all -n "$NS" --grace-period=0 --wait=false 2>/dev/null || true
-# Give kubelet/CSI a moment when driver is still present
-sleep 2
+if [[ "$DRIVER_NS" == "$NS" ]]; then
+  delete_e2e_workloads
+else
+  kubectl delete deploy,sts,ds,job,pod --all -n "$NS" \
+    --grace-period=0 --wait=true --timeout=2m
+fi
 
-echo "==> delete PVCs in app ns"
-kubectl delete pvc --all -n "$NS" --grace-period=0 --wait=false 2>/dev/null || true
+echo "==> delete PVCs in app ns and wait for PV teardown"
+kubectl delete pvc --all -n "$NS" --wait=true --timeout=2m
+wait_for_pvs
 
-echo "==> uninstall helm release (no wait)"
-helm uninstall "$RELEASE" -n "$DRIVER_NS" 2>/dev/null || true
+echo "==> uninstall helm release"
+helm uninstall "$RELEASE" -n "$DRIVER_NS"
 
 echo "==> delete cluster-scoped e2e resources"
 kubectl delete clusterrole,clusterrolebinding volume-recovery-operator-e2e volume-recovery-operator \
