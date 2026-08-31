@@ -25,16 +25,15 @@ import (
 
 	"github.com/veloxpack/csi-driver-rclone/pkg/rclone"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
 
 const (
-	// RecoveryAnnotation records the last time a pod was restarted for stale mount recovery.
-	RecoveryAnnotation = "volume.veloxpack.io/last-recovery"
-
 	// EventReasonStaleCSIMount is emitted before force-deleting a pod for a stale mount.
 	EventReasonStaleCSIMount = "StaleCSIMount"
 	// EventReasonCSINodeUIDChanged is emitted before force-deleting a pod after CSI node restart.
@@ -59,17 +58,19 @@ type Reconciler struct {
 	resolveFuseConnID      func(path string) (string, error) // overridable in tests
 	abortFuseConn          func(id string) error             // overridable in tests
 	killMountProcess       func(path string) error           // overridable in tests
-	mu                     sync.Mutex                        // serializes pod deletes across CSI + scan loops
+	mu                     sync.Mutex                        // serializes pod deletes + lastRecovery
+	lastRecovery           map[string]time.Time              // RecoveryKey → last restart
 }
 
 // NewReconciler builds a node-local pod reconciler.
 func NewReconciler(client kubernetes.Interface, nodeName, provisioner string) *Reconciler {
 	return &Reconciler{
-		client:      client,
-		nodeName:    nodeName,
-		provisioner: provisioner,
-		cooldown:    defaultRecoveryCooldown,
-		lazyUmount:  LazyUmount,
+		client:       client,
+		nodeName:     nodeName,
+		provisioner:  provisioner,
+		cooldown:     defaultRecoveryCooldown,
+		lazyUmount:   LazyUmount,
+		lastRecovery: map[string]time.Time{},
 	}
 }
 
@@ -155,7 +156,7 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 			continue
 		}
 
-		if IsRateLimited(pod, now, r.cooldown) {
+		if r.isRateLimited(pod, now) {
 			klog.V(2).InfoS("rate limited stale mount recovery", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
@@ -256,7 +257,7 @@ func (r *Reconciler) ReconcileWorkloadPodsAfterCSIRestart(ctx context.Context) e
 		if !r.podUsesProvisioner(ctx, pod) {
 			continue
 		}
-		if IsRateLimited(pod, now, r.cooldown) {
+		if r.isRateLimited(pod, now) {
 			klog.V(2).InfoS("rate limited CSI restart recovery", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
@@ -322,26 +323,54 @@ func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.T
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	pod = pod.DeepCopy()
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[RecoveryAnnotation] = now.UTC().Format(time.RFC3339)
-
-	if r.recorder != nil {
-		r.recorder.Event(pod, corev1.EventTypeWarning, reason, message)
-	}
-
-	if _, err := r.client.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("annotate pod before restart: %w", err)
-	}
+	// No pod annotate: Update races with the other recovery loop and the annotation
+	// is lost on recreate anyway. Cooldown is tracked in-memory by RecoveryKey.
+	r.emitRecoveryEvents(pod, reason, message)
+	r.markRecoveredLocked(pod, now)
 
 	grace := int64(0)
 	deletePolicy := metav1.DeletePropagationBackground
-	return r.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+	err := r.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
 		GracePeriodSeconds: &grace,
 		PropagationPolicy:  &deletePolicy,
 	})
+	if apierrors.IsNotFound(err) {
+		klog.V(2).InfoS("pod already gone before delete; treating restart as done",
+			"pod", pod.Namespace+"/"+pod.Name, "reason", reason)
+		return nil
+	}
+	return err
+}
+
+func (r *Reconciler) emitRecoveryEvents(pod *corev1.Pod, reason, message string) {
+	if r.recorder == nil {
+		return
+	}
+	// Prefer controller owner so the Event survives Pod recreate.
+	if owner := controllerOwnerObject(pod); owner != nil {
+		r.recorder.Event(owner, corev1.EventTypeWarning, reason, message)
+		return
+	}
+	r.recorder.Event(pod, corev1.EventTypeWarning, reason, message)
+}
+
+// controllerOwnerObject returns a minimal runtime.Object for the pod's controller owner
+// so Events remain visible on ReplicaSet/StatefulSet/Job after the Pod UID churns.
+func controllerOwnerObject(pod *corev1.Pod) runtime.Object {
+	for i := range pod.OwnerReferences {
+		o := &pod.OwnerReferences[i]
+		if o.Controller == nil || !*o.Controller {
+			continue
+		}
+		return &corev1.ObjectReference{
+			APIVersion: o.APIVersion,
+			Kind:       o.Kind,
+			Namespace:  pod.Namespace,
+			Name:       o.Name,
+			UID:        o.UID,
+		}
+	}
+	return nil
 }
 
 // ShouldSkipPod reports whether a pod must not be restarted by the recovery operator.
@@ -364,20 +393,32 @@ func ShouldSkipPod(pod *corev1.Pod) bool {
 	return false
 }
 
-// IsRateLimited returns true when the pod was recovered within the cooldown window.
-func IsRateLimited(pod *corev1.Pod, now time.Time, cooldown time.Duration) bool {
-	if pod.Annotations == nil {
+// RecoveryKey identifies a workload across Pod recreates (controller owner, else Pod name).
+func RecoveryKey(pod *corev1.Pod) string {
+	for _, o := range pod.OwnerReferences {
+		if o.Controller == nil || !*o.Controller {
+			continue
+		}
+		return pod.Namespace + "/" + o.Kind + "/" + o.Name
+	}
+	return pod.Namespace + "/Pod/" + pod.Name
+}
+
+func (r *Reconciler) isRateLimited(pod *corev1.Pod, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	last, ok := r.lastRecovery[RecoveryKey(pod)]
+	if !ok {
 		return false
 	}
-	raw, ok := pod.Annotations[RecoveryAnnotation]
-	if !ok || raw == "" {
-		return false
+	return now.Sub(last) < r.cooldown
+}
+
+func (r *Reconciler) markRecoveredLocked(pod *corev1.Pod, now time.Time) {
+	if r.lastRecovery == nil {
+		r.lastRecovery = map[string]time.Time{}
 	}
-	last, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return true
-	}
-	return now.Sub(last) < cooldown
+	r.lastRecovery[RecoveryKey(pod)] = now
 }
 
 func podUsesProvisionerVolume(

@@ -131,7 +131,7 @@ Helm values must set custom image + `node.remount.enabled=true` for Phase B test
 3. `kubectl delete pod -l app=csi-rclone-node -n csi-rclone-e2e --grace-period=0`
 4. Wait for new CSI node pod Ready
 5. Watch operator logs for `CSI node pod restart detected` / `restarted pod after CSI node restart`
-6. Confirm workload pods recreated with `volume.veloxpack.io/last-recovery` annotation
+6. Confirm workload pods recreated; Warning Event `StaleCSIMount` or `CSINodeUIDChanged` on the controller owner (ReplicaSet/…); no `volume.veloxpack.io/last-recovery` annotation required
 7. `kubectl exec deploy/e2e-writer -- tail /data/e2e.log` (no manual rollout)
 
 **Pass criteria:**
@@ -206,20 +206,23 @@ kubectl apply -f hack/e2e/workloads.yaml
 
 ## Cleanup
 
-Fast teardown (no long `--wait`; handles stuck Terminating PVCs/PVs and orphan namespaces):
+See **[cluster-e2e.md](./cluster-e2e.md)** for the required order (workloads → PVCs → helm uninstall → namespaces) and stuck-NS recovery.
+
+Fast helper:
 
 ```bash
 ./hack/e2e/cleanup.sh
 ```
 
-Manual equivalent:
+Manual equivalent (prefer workloads/PVCs **before** helm uninstall when CSI is still up):
 
 ```bash
+kubectl delete deploy,sts,ds,job,pod --all -n csi-rclone-e2e --grace-period=0 --wait=false
+kubectl delete pvc --all -n csi-rclone-e2e --grace-period=0 --wait=false
 helm uninstall csi-rclone-e2e -n csi-rclone-e2e
 kubectl delete clusterrole,clusterrolebinding volume-recovery-operator-e2e --wait=false
 kubectl delete sc rclone-e2e-bad rclone-e2e --wait=false
-kubectl delete all,pvc --all -n csi-rclone-e2e --grace-period=0 --force --wait=false
-# if namespace stuck Terminating: patch PV/PVC finalizers, then:
+# if namespace stuck Terminating: patch PV/PVC finalizers (test claims only), then:
 kubectl get namespace csi-rclone-e2e -o json | jq '.spec.finalizers=[]' | \
   kubectl replace --raw /api/v1/namespaces/csi-rclone-e2e/finalize -f -
 # if namespace object gone but PVCs remain: recreate ns, patch PVC finalizers, delete again

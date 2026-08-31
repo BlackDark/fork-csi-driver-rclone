@@ -78,35 +78,35 @@ func TestShouldSkipPod(t *testing.T) {
 
 func TestIsRateLimited(t *testing.T) {
 	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
-	cooldown := time.Hour
+	r := NewReconciler(fake.NewSimpleClientset(), "node-1", "rclone.csi.veloxpack.io")
+	r.cooldown = time.Hour
 
-	podRecent := &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				RecoveryAnnotation: now.Add(-30 * time.Minute).Format(time.RFC3339),
-			},
+			Name:      "writer-abc",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "writer",
+				UID:        "rs-1",
+				Controller: boolPtr(true),
+			}},
 		},
 	}
-	assert.True(t, IsRateLimited(podRecent, now, cooldown))
+	assert.False(t, r.isRateLimited(pod, now))
 
-	podOld := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				RecoveryAnnotation: now.Add(-2 * time.Hour).Format(time.RFC3339),
-			},
-		},
-	}
-	assert.False(t, IsRateLimited(podOld, now, cooldown))
+	r.mu.Lock()
+	r.markRecoveredLocked(pod, now.Add(-30*time.Minute))
+	r.mu.Unlock()
+	assert.True(t, r.isRateLimited(pod, now))
 
-	podMissing := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{}}
-	assert.False(t, IsRateLimited(podMissing, now, cooldown))
+	// Same controller, different pod name still rate-limited.
+	pod2 := pod.DeepCopy()
+	pod2.Name = "writer-xyz"
+	assert.True(t, r.isRateLimited(pod2, now))
 
-	podInvalid := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{RecoveryAnnotation: "not-a-timestamp"},
-		},
-	}
-	assert.True(t, IsRateLimited(podInvalid, now, cooldown))
+	assert.False(t, r.isRateLimited(pod, now.Add(2*time.Hour)))
 }
 
 func TestReconcileStaleMountsLazyUmountsMissingPod(t *testing.T) {
@@ -392,3 +392,41 @@ func TestReconcileWorkloadPodsAfterCSIRestartUsesLocalVolData(t *testing.T) {
 		t.Fatal("expected CSINodeUIDChanged event")
 	}
 }
+
+func TestRestartPodTreatsNotFoundAsDone(t *testing.T) {
+	client := fake.NewSimpleClientset() // pod absent
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	recorder := record.NewFakeRecorder(2)
+	r.SetEventRecorder(recorder)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gone",
+			Namespace: "default",
+			UID:       "uid-gone",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "gone-rs",
+				UID:        "rs-uid",
+				Controller: boolPtr(true),
+			}},
+		},
+	}
+	err := r.restartPod(context.Background(), pod, time.Now(), EventReasonCSINodeUIDChanged, "csi restarted")
+	require.NoError(t, err)
+
+	select {
+	case evt := <-recorder.Events:
+		assert.Contains(t, evt, EventReasonCSINodeUIDChanged)
+	case <-time.After(time.Second):
+		t.Fatal("expected owner event")
+	}
+	select {
+	case evt := <-recorder.Events:
+		t.Fatalf("unexpected second event (pod should not be annotated/evented when owner exists): %s", evt)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }

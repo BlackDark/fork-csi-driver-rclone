@@ -102,9 +102,13 @@ func TestReconcileStaleMountsRateLimited(t *testing.T) {
 			Name:      "app",
 			Namespace: "default",
 			UID:       "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-			Annotations: map[string]string{
-				RecoveryAnnotation: now.Add(-10 * time.Minute).Format(time.RFC3339),
-			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "app",
+				UID:        "rs-app",
+				Controller: boolPtr(true),
+			}},
 		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-1",
@@ -119,6 +123,9 @@ func TestReconcileStaleMountsRateLimited(t *testing.T) {
 
 	client := fake.NewSimpleClientset(pod)
 	r := NewReconciler(client, "node-1", provisioner)
+	r.mu.Lock()
+	r.markRecoveredLocked(pod, now.Add(-10*time.Minute))
+	r.mu.Unlock()
 
 	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{
 		{PodUID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", VolumeName: "data", MountPath: "/mnt"},

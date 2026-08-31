@@ -49,8 +49,9 @@ CSI-UID recovery and stale-mount scanning run on **separate goroutines/tickers**
 3. Match mount pod UID to pods scheduled on this node
 4. If pod UID is gone: resolve FUSE conn id from mountinfo → lazy-umount (`MNT_DETACH`) → abort FUSE conn → best-effort kill mount process
 5. Skip `kube-system`, pods named `*csi-rclone*`, and CSI DaemonSet pods
-6. Rate limit: at most one recovery delete per pod per hour (`volume.veloxpack.io/last-recovery` annotation)
-7. Emit a Warning Event on the Pod (`StaleCSIMount` or `CSINodeUIDChanged`) describing why, then delete the pod (grace period 0) so controllers recreate it with fresh mounts
+6. Rate limit: at most one recovery delete per workload per hour (in-memory by controller owner key; no pod annotation)
+7. Emit a Warning Event on the **controller owner** (ReplicaSet/StatefulSet/…; bare Pod if none) with reason `StaleCSIMount` or `CSINodeUIDChanged`, then delete the pod (grace period 0). No annotate-before-delete (avoids NotFound races; annotation would not survive recreate).
+8. If delete hits `NotFound` (other recovery path already removed the Pod), treat as done — do not Error-log.
 
 Ownership checks prefer node-local `vol_data.json` so foreign CSI volumes do not generate API GETs or mount probes.
 ## Uninstall
