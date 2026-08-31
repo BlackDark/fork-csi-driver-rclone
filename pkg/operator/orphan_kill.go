@@ -19,7 +19,6 @@ package operator
 import (
 	"bytes"
 	"path/filepath"
-	"strings"
 )
 
 // ShouldKillOrphanMountProcess reports whether best-effort kill of a hung mount
@@ -41,16 +40,12 @@ func MatchMountServerCmdline(cmdline []byte, publishPath string) bool {
 		return false
 	}
 	clean := filepath.Clean(publishPath)
-	joined := string(bytes.ReplaceAll(cmdline, []byte{0}, []byte{' '}))
-	if strings.Contains(joined, publishPath) || strings.Contains(joined, clean) {
-		return true
-	}
 	for _, arg := range bytes.Split(cmdline, []byte{0}) {
 		if len(arg) == 0 {
 			continue
 		}
-		a := string(arg)
-		if a == publishPath || filepath.Clean(a) == clean {
+		path := string(arg)
+		if path == publishPath || filepath.Clean(path) == clean {
 			return true
 		}
 	}
