@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 )
 
@@ -68,48 +69,50 @@ func (r *Reconciler) annotateOwner(ctx context.Context, pod *corev1.Pod, now tim
 		return nil
 	}
 	ns := pod.Namespace
-	switch o.Kind {
-	case "ReplicaSet":
-		rs, err := r.client.AppsV1().ReplicaSets(ns).Get(ctx, o.Name, metav1.GetOptions{})
-		if err != nil {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		switch o.Kind {
+		case "ReplicaSet":
+			rs, err := r.client.AppsV1().ReplicaSets(ns).Get(ctx, o.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			rs = rs.DeepCopy()
+			setRecoveryAnnotation(&rs.ObjectMeta, now)
+			_, err = r.client.AppsV1().ReplicaSets(ns).Update(ctx, rs, metav1.UpdateOptions{})
 			return err
-		}
-		rs = rs.DeepCopy()
-		setRecoveryAnnotation(&rs.ObjectMeta, now)
-		_, err = r.client.AppsV1().ReplicaSets(ns).Update(ctx, rs, metav1.UpdateOptions{})
-		return err
-	case "StatefulSet":
-		sts, err := r.client.AppsV1().StatefulSets(ns).Get(ctx, o.Name, metav1.GetOptions{})
-		if err != nil {
+		case "StatefulSet":
+			sts, err := r.client.AppsV1().StatefulSets(ns).Get(ctx, o.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			sts = sts.DeepCopy()
+			setRecoveryAnnotation(&sts.ObjectMeta, now)
+			_, err = r.client.AppsV1().StatefulSets(ns).Update(ctx, sts, metav1.UpdateOptions{})
 			return err
-		}
-		sts = sts.DeepCopy()
-		setRecoveryAnnotation(&sts.ObjectMeta, now)
-		_, err = r.client.AppsV1().StatefulSets(ns).Update(ctx, sts, metav1.UpdateOptions{})
-		return err
-	case "DaemonSet":
-		ds, err := r.client.AppsV1().DaemonSets(ns).Get(ctx, o.Name, metav1.GetOptions{})
-		if err != nil {
+		case "DaemonSet":
+			ds, err := r.client.AppsV1().DaemonSets(ns).Get(ctx, o.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			ds = ds.DeepCopy()
+			setRecoveryAnnotation(&ds.ObjectMeta, now)
+			_, err = r.client.AppsV1().DaemonSets(ns).Update(ctx, ds, metav1.UpdateOptions{})
 			return err
-		}
-		ds = ds.DeepCopy()
-		setRecoveryAnnotation(&ds.ObjectMeta, now)
-		_, err = r.client.AppsV1().DaemonSets(ns).Update(ctx, ds, metav1.UpdateOptions{})
-		return err
-	case "Job":
-		job, err := r.client.BatchV1().Jobs(ns).Get(ctx, o.Name, metav1.GetOptions{})
-		if err != nil {
+		case "Job":
+			job, err := r.client.BatchV1().Jobs(ns).Get(ctx, o.Name, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			job = job.DeepCopy()
+			setRecoveryAnnotation(&job.ObjectMeta, now)
+			_, err = r.client.BatchV1().Jobs(ns).Update(ctx, job, metav1.UpdateOptions{})
 			return err
+		default:
+			klog.V(4).InfoS("skip owner annotate for unsupported kind",
+				"pod", ns+"/"+pod.Name, "kind", o.Kind, "name", o.Name)
+			return nil
 		}
-		job = job.DeepCopy()
-		setRecoveryAnnotation(&job.ObjectMeta, now)
-		_, err = r.client.BatchV1().Jobs(ns).Update(ctx, job, metav1.UpdateOptions{})
-		return err
-	default:
-		klog.V(4).InfoS("skip owner annotate for unsupported kind",
-			"pod", ns+"/"+pod.Name, "kind", o.Kind, "name", o.Name)
-		return nil
-	}
+	})
 }
 
 func (r *Reconciler) ownerAnnotationRateLimited(ctx context.Context, pod *corev1.Pod, now time.Time) bool {

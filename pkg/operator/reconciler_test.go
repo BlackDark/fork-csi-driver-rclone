@@ -28,8 +28,10 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -139,6 +141,36 @@ func TestRestartPodDoesNotRecordFailedDelete(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, r.lastRecovery)
 }
+func TestRestartPodRetriesOwnerAnnotationConflict(t *testing.T) {
+	controller := true
+	owner := metav1.OwnerReference{
+		APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "writer", UID: "rs-uid", Controller: &controller,
+	}
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: "default"}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "writer-pod", Namespace: "default", UID: "writer-uid", OwnerReferences: []metav1.OwnerReference{owner},
+	}}
+	client := fake.NewSimpleClientset(rs, pod)
+	attempts := 0
+	client.PrependReactor("update", "replicasets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		attempts++
+		if attempts == 1 {
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{Group: "apps", Resource: "replicasets"}, "writer", errors.New("conflict"),
+			)
+		}
+		return false, nil, nil
+	})
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+
+	require.NoError(t, r.restartPod(context.Background(), pod, now, EventReasonStaleCSIMount, "stale"))
+	got, err := client.AppsV1().ReplicaSets("default").Get(context.Background(), rs.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, now.Format(time.RFC3339), got.Annotations[RecoveryAnnotation])
+	assert.Equal(t, 2, attempts)
+}
+
 func TestReconcileStaleMountsLazyUmountsMissingPod(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
