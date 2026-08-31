@@ -56,21 +56,25 @@ func TestShouldSkipPod(t *testing.T) {
 		},
 		{
 			name: "csi daemonset owner",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "node-driver",
-					Namespace: "system",
-					OwnerReferences: []metav1.OwnerReference{{
-						Kind: "DaemonSet",
-						Name: "csi-rclone-node",
-					}},
-				},
-			},
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "node-driver", Namespace: "system",
+				OwnerReferences: []metav1.OwnerReference{{Kind: "DaemonSet", Name: "csi-rclone-node"}},
+			}},
+			want: true,
+		},
+		{
+			name: "standalone pod",
+			pod:  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "jobless", Namespace: "default"}},
 			want: true,
 		},
 		{
 			name: "workload pod",
-			pod:  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "default"}},
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "nginx", Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "ReplicaSet", Name: "nginx", Controller: boolPtr(true),
+				}},
+			}},
 			want: false,
 		},
 	}
@@ -170,6 +174,25 @@ func TestRestartPodRetriesOwnerAnnotationConflict(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, now.Format(time.RFC3339), got.Annotations[RecoveryAnnotation])
 	assert.Equal(t, 2, attempts)
+}
+
+func TestRestartPodUsesObservedUIDPrecondition(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "writer", Namespace: "default", UID: "writer-uid",
+	}}
+	client := fake.NewSimpleClientset(pod)
+	client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		deleteAction := action.(k8stesting.DeleteAction)
+		preconditions := deleteAction.GetDeleteOptions().Preconditions
+		require.NotNil(t, preconditions)
+		require.NotNil(t, preconditions.UID)
+		assert.Equal(t, pod.UID, *preconditions.UID)
+		return false, nil, nil
+	})
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.replacementWait = 0
+
+	require.NoError(t, r.restartPod(context.Background(), pod, time.Now(), EventReasonStaleCSIMount, "stale"))
 }
 
 func TestReconcileStaleMountsLazyUmountsMissingPod(t *testing.T) {

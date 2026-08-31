@@ -350,6 +350,7 @@ func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.T
 	err = r.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
 		GracePeriodSeconds: &grace,
 		PropagationPolicy:  &deletePolicy,
+		Preconditions:      &metav1.Preconditions{UID: &pod.UID},
 	})
 	if apierrors.IsNotFound(err) {
 		klog.V(2).InfoS("pod already gone before delete; treating restart as done",
@@ -406,6 +407,9 @@ func controllerOwnerObject(pod *corev1.Pod) runtime.Object {
 
 // ShouldSkipPod reports whether a pod must not be restarted by the recovery operator.
 func ShouldSkipPod(pod *corev1.Pod) bool {
+	if pod == nil || controllerOwnerRef(pod) == nil {
+		return true
+	}
 	if pod.Namespace == "kube-system" {
 		return true
 	}
