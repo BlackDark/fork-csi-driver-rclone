@@ -25,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -94,19 +95,19 @@ func TestIsRateLimited(t *testing.T) {
 			}},
 		},
 	}
-	assert.False(t, r.isRateLimited(pod, now))
+	assert.False(t, r.isRateLimited(context.Background(), pod, now))
 
 	r.mu.Lock()
 	r.markRecoveredLocked(pod, now.Add(-30*time.Minute))
 	r.mu.Unlock()
-	assert.True(t, r.isRateLimited(pod, now))
+	assert.True(t, r.isRateLimited(context.Background(), pod, now))
 
 	// Same controller, different pod name still rate-limited.
 	pod2 := pod.DeepCopy()
 	pod2.Name = "writer-xyz"
-	assert.True(t, r.isRateLimited(pod2, now))
+	assert.True(t, r.isRateLimited(context.Background(), pod2, now))
 
-	assert.False(t, r.isRateLimited(pod, now.Add(2*time.Hour)))
+	assert.False(t, r.isRateLimited(context.Background(), pod, now.Add(2*time.Hour)))
 }
 
 func TestReconcileStaleMountsLazyUmountsMissingPod(t *testing.T) {
@@ -427,6 +428,65 @@ func TestRestartPodTreatsNotFoundAsDone(t *testing.T) {
 		t.Fatalf("unexpected second event (pod should not be annotated/evented when owner exists): %s", evt)
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+func TestRestartPodAnnotatesOwnerAndReplacement(t *testing.T) {
+	provisioner := "rclone.csi.veloxpack.io"
+	ctrl := true
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: "default", UID: "rs-uid"},
+	}
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "writer-old",
+			Namespace: "default",
+			UID:       "old-uid",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "writer",
+				UID:        "rs-uid",
+				Controller: &ctrl,
+			}},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+	}
+	newPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "writer-new",
+			Namespace: "default",
+			UID:       "new-uid",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       "writer",
+				UID:        "rs-uid",
+				Controller: &ctrl,
+			}},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+	}
+	client := fake.NewSimpleClientset(rs, oldPod)
+	r := NewReconciler(client, "node-1", provisioner)
+	r.replacementWait = 0
+
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, r.restartPod(context.Background(), oldPod, now, EventReasonStaleCSIMount, "stale"))
+
+	_, err := client.CoreV1().Pods("default").Get(context.Background(), "writer-old", metav1.GetOptions{})
+	assert.Error(t, err)
+
+	gotRS, err := client.AppsV1().ReplicaSets("default").Get(context.Background(), "writer", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, now.Format(time.RFC3339), gotRS.Annotations[RecoveryAnnotation])
+
+	_, err = client.CoreV1().Pods("default").Create(context.Background(), newPod, metav1.CreateOptions{})
+	require.NoError(t, err)
+	r.annotateReplacementPod(context.Background(), oldPod, now)
+
+	gotNew, err := client.CoreV1().Pods("default").Get(context.Background(), "writer-new", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, now.Format(time.RFC3339), gotNew.Annotations[RecoveryAnnotation])
 }
 
 func boolPtr(v bool) *bool { return &v }

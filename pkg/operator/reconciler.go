@@ -60,17 +60,19 @@ type Reconciler struct {
 	killMountProcess       func(path string) error           // overridable in tests
 	mu                     sync.Mutex                        // serializes pod deletes + lastRecovery
 	lastRecovery           map[string]time.Time              // RecoveryKey → last restart
+	replacementWait        time.Duration                     // best-effort wait to annotate recreated Pod
 }
 
 // NewReconciler builds a node-local pod reconciler.
 func NewReconciler(client kubernetes.Interface, nodeName, provisioner string) *Reconciler {
 	return &Reconciler{
-		client:       client,
-		nodeName:     nodeName,
-		provisioner:  provisioner,
-		cooldown:     defaultRecoveryCooldown,
-		lazyUmount:   LazyUmount,
-		lastRecovery: map[string]time.Time{},
+		client:          client,
+		nodeName:        nodeName,
+		provisioner:     provisioner,
+		cooldown:        defaultRecoveryCooldown,
+		lazyUmount:      LazyUmount,
+		lastRecovery:    map[string]time.Time{},
+		replacementWait: defaultReplacementAnnotateWait,
 	}
 }
 
@@ -156,7 +158,7 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 			continue
 		}
 
-		if r.isRateLimited(pod, now) {
+		if r.isRateLimited(ctx, pod, now) {
 			klog.V(2).InfoS("rate limited stale mount recovery", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
@@ -257,7 +259,7 @@ func (r *Reconciler) ReconcileWorkloadPodsAfterCSIRestart(ctx context.Context) e
 		if !r.podUsesProvisioner(ctx, pod) {
 			continue
 		}
-		if r.isRateLimited(pod, now) {
+		if r.isRateLimited(ctx, pod, now) {
 			klog.V(2).InfoS("rate limited CSI restart recovery", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
@@ -320,13 +322,17 @@ func podHasProvisionerVolume(
 }
 
 func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.Time, reason, message string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// No pod annotate: Update races with the other recovery loop and the annotation
-	// is lost on recreate anyway. Cooldown is tracked in-memory by RecoveryKey.
+	// Annotate controller owner + Event before delete (survives Pod recreate).
+	// Never annotate the dying Pod (Update races; annotation would be deleted with it).
 	r.emitRecoveryEvents(pod, reason, message)
+	if err := r.annotateOwner(ctx, pod, now); err != nil {
+		klog.V(2).InfoS("failed to annotate recovery owner",
+			"pod", pod.Namespace+"/"+pod.Name, "err", err)
+	}
+
+	r.mu.Lock()
 	r.markRecoveredLocked(pod, now)
+	r.mu.Unlock()
 
 	grace := int64(0)
 	deletePolicy := metav1.DeletePropagationBackground
@@ -337,9 +343,15 @@ func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.T
 	if apierrors.IsNotFound(err) {
 		klog.V(2).InfoS("pod already gone before delete; treating restart as done",
 			"pod", pod.Namespace+"/"+pod.Name, "reason", reason)
-		return nil
+		err = nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Best-effort: annotate the replacement Pod once the controller recreates it.
+	r.scheduleReplacementAnnotate(pod, now)
+	return nil
 }
 
 func (r *Reconciler) emitRecoveryEvents(pod *corev1.Pod, reason, message string) {
@@ -404,14 +416,15 @@ func RecoveryKey(pod *corev1.Pod) string {
 	return pod.Namespace + "/Pod/" + pod.Name
 }
 
-func (r *Reconciler) isRateLimited(pod *corev1.Pod, now time.Time) bool {
+func (r *Reconciler) isRateLimited(ctx context.Context, pod *corev1.Pod, now time.Time) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	last, ok := r.lastRecovery[RecoveryKey(pod)]
-	if !ok {
-		return false
+	cooldown := r.cooldown
+	r.mu.Unlock()
+	if ok && now.Sub(last) < cooldown {
+		return true
 	}
-	return now.Sub(last) < r.cooldown
+	return r.ownerAnnotationRateLimited(ctx, pod, now)
 }
 
 func (r *Reconciler) markRecoveredLocked(pod *corev1.Pod, now time.Time) {

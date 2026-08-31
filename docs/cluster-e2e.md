@@ -18,7 +18,7 @@ Related: [integration-test-plan.md](./integration-test-plan.md), [mount-recovery
 |-------|-----|
 | No API throttle on foreign PVCs | Operator logs: no `client-side throttling` for unrelated ns (media/monitoring/…) |
 | Ownership filter | Stale/restart actions only for this provisioner / `fuse.rclone` |
-| Recovery Events | `kubectl get events -n <app> --field-selector reason=StaleCSIMount` or `CSINodeUIDChanged` — involved object is the **controller owner** (ReplicaSet/…), not the replacement Pod |
+| Recovery Events | `kubectl get events -n <app> --field-selector reason=StaleCSIMount` or `CSINodeUIDChanged` — involved object is the **controller owner** (ReplicaSet/…). Annotation `volume.veloxpack.io/last-recovery` on owner (+ best-effort on new Pod) |
 | Orphan FUSE | Inject dead UID + `SIGSTOP` rclone; delete CSI node; expect lazy-umount + abort/kill; CSI Ready without manual umount |
 
 ## Cleanup order (important)

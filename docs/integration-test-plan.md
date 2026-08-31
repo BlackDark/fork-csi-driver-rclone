@@ -131,7 +131,7 @@ Helm values must set custom image + `node.remount.enabled=true` for Phase B test
 3. `kubectl delete pod -l app=csi-rclone-node -n csi-rclone-e2e --grace-period=0`
 4. Wait for new CSI node pod Ready
 5. Watch operator logs for `CSI node pod restart detected` / `restarted pod after CSI node restart`
-6. Confirm workload pods recreated; Warning Event `StaleCSIMount` or `CSINodeUIDChanged` on the controller owner (ReplicaSet/…); no `volume.veloxpack.io/last-recovery` annotation required
+6. Confirm workload pods recreated; Warning Event + `volume.veloxpack.io/last-recovery` on controller owner (and best-effort on the new Pod)
 7. `kubectl exec deploy/e2e-writer -- tail /data/e2e.log` (no manual rollout)
 
 **Pass criteria:**
