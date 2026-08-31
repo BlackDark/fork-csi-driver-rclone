@@ -55,11 +55,6 @@ kubectl delete all --all -n "$NS" --grace-period=0 --force --wait=false 2>/dev/n
 kubectl delete pvc --all -n "$NS" --grace-period=0 --wait=false 2>/dev/null || true
 kubectl delete secrets -n "$NS" -l csi.veloxpack.io/mount-state \
   --grace-period=0 --wait=false 2>/dev/null || true
-if [[ "$DRIVER_NS" != "$NS" ]]; then
-  kubectl delete all --all -n "$DRIVER_NS" --grace-period=0 --force --wait=false 2>/dev/null || true
-  kubectl delete secrets -n "$DRIVER_NS" -l csi.veloxpack.io/mount-state \
-    --grace-period=0 --wait=false 2>/dev/null || true
-fi
 
 echo "==> clear PV finalizers for e2e claims (test ns only)"
 clear_ns_pvs() {
@@ -72,10 +67,9 @@ clear_ns_pvs() {
     --arg ns "$ns" '.items[] | select(.spec.claimRef.namespace==$ns) | .metadata.name')
 }
 clear_ns_pvs "$NS"
-[[ "$DRIVER_NS" != "$NS" ]] && clear_ns_pvs "$DRIVER_NS"
 
 # Orphan namespace: ns object gone but PVCs/Pods remain Terminating.
-for orphan_ns in "$NS" "$DRIVER_NS"; do
+for orphan_ns in "$NS"; do
   if ! kubectl get namespace "$orphan_ns" >/dev/null 2>&1; then
     if kubectl get pvc -A -o json 2>/dev/null | jq -e --arg ns "$orphan_ns" \
       '.items[] | select(.metadata.namespace==$ns)' >/dev/null; then
@@ -92,7 +86,6 @@ done
 
 echo "==> delete namespace(s) (no wait)"
 kubectl delete namespace "$NS" --grace-period=0 --wait=false 2>/dev/null || true
-[[ "$DRIVER_NS" != "$NS" ]] && kubectl delete namespace "$DRIVER_NS" --grace-period=0 --wait=false 2>/dev/null || true
 
 finalize_ns() {
   local ns="$1"
@@ -103,7 +96,6 @@ finalize_ns() {
   fi
 }
 finalize_ns "$NS"
-[[ "$DRIVER_NS" != "$NS" ]] && finalize_ns "$DRIVER_NS"
 
 echo "==> verify"
 if kubectl get pvc,pv,sc,pods -A 2>/dev/null | rg -q "csi-rclone-e2e|rclone-e2e|csi-rclone-v060|rclone-v060"; then
