@@ -27,3 +27,11 @@ func resolveFuseConnID(path string) (string, error) {
 	}
 	return ParseFuseConnIDFromMountinfo(string(data), path)
 }
+
+func fuseConnSharedByOtherMount(path, connID string) (bool, error) {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false, err
+	}
+	return fuseConnSharedInMountinfo(string(data), path, connID), nil
+}

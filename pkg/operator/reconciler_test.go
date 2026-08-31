@@ -18,6 +18,7 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,8 +29,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 )
 
@@ -122,6 +125,20 @@ func TestPruneExpiredRecoveries(t *testing.T) {
 	r.pruneExpiredRecoveries(now)
 	assert.Equal(t, map[string]time.Time{"default/Pod/recent": now.Add(-time.Minute)}, r.lastRecovery)
 }
+func TestRestartPodDoesNotRecordFailedDelete(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: "writer", Namespace: "default", UID: "writer-uid",
+	}}
+	client := fake.NewSimpleClientset(pod)
+	client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("delete failed")
+	})
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+
+	err := r.restartPod(context.Background(), pod, time.Now(), EventReasonStaleCSIMount, "stale")
+	require.Error(t, err)
+	assert.Empty(t, r.lastRecovery)
+}
 func TestReconcileStaleMountsLazyUmountsMissingPod(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
@@ -182,6 +199,7 @@ func TestReconcileStaleMountsAbortAndKillOnOrphan(t *testing.T) {
 		resolved = append(resolved, path)
 		return "47", nil
 	}
+	r.fuseConnShared = func(string, string) (bool, error) { return false, nil }
 	r.lazyUmount = func(path string) error {
 		umounted = append(umounted, path)
 		return nil
@@ -208,6 +226,23 @@ func TestReconcileStaleMountsAbortAndKillOnOrphan(t *testing.T) {
 	// resolve must happen before umount (captured order via sequential appends in maybeLazyUmountOrphan)
 	require.Len(t, resolved, 1)
 	require.Len(t, umounted, 1)
+}
+
+func TestReconcileStaleMountsSkipsAbortForSharedFuse(t *testing.T) {
+	r := NewReconciler(fake.NewSimpleClientset(), "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(true)
+	r.SetOrphanFuseAbort(true)
+	r.resolveFuseConnID = func(string) (string, error) { return "47", nil }
+	r.fuseConnShared = func(string, string) (bool, error) { return true, nil }
+	r.lazyUmount = func(string) error { return nil }
+	aborted := false
+	r.abortFuseConn = func(string) error { aborted = true; return nil }
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID: "dead-uid", VolumeName: "data", MountPath: "/mnt/orphan",
+	}})
+	require.NoError(t, err)
+	assert.False(t, aborted)
 }
 
 func TestReconcileStaleMountsSkipsAbortKillWhenFlagsOff(t *testing.T) {
@@ -483,6 +518,8 @@ func TestRestartPodAnnotatesOwnerAndReplacement(t *testing.T) {
 	r.replacementWait = 0
 
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	oldPod.CreationTimestamp = metav1.NewTime(now.Add(-time.Minute))
+	newPod.CreationTimestamp = metav1.NewTime(now.Add(time.Minute))
 	require.NoError(t, r.restartPod(context.Background(), oldPod, now, EventReasonStaleCSIMount, "stale"))
 
 	_, err := client.CoreV1().Pods("default").Get(context.Background(), "writer-old", metav1.GetOptions{})
@@ -494,11 +531,51 @@ func TestRestartPodAnnotatesOwnerAndReplacement(t *testing.T) {
 
 	_, err = client.CoreV1().Pods("default").Create(context.Background(), newPod, metav1.CreateOptions{})
 	require.NoError(t, err)
-	r.annotateReplacementPod(context.Background(), oldPod, now)
+	r.annotateReplacementPod(context.Background(), oldPod, now, map[string]struct{}{string(oldPod.UID): {}})
 
 	gotNew, err := client.CoreV1().Pods("default").Get(context.Background(), "writer-new", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, now.Format(time.RFC3339), gotNew.Annotations[RecoveryAnnotation])
+}
+
+func TestAnnotateReplacementPodSkipsExistingSiblings(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	controller := true
+	owner := metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "writer",
+		UID:        "rs-uid",
+		Controller: &controller,
+	}
+	old := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:              "writer-old",
+		Namespace:         "default",
+		UID:               "old-uid",
+		CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		OwnerReferences:   []metav1.OwnerReference{owner},
+	}}
+	sibling := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:              "writer-sibling",
+		Namespace:         "default",
+		UID:               "sibling-uid",
+		CreationTimestamp: metav1.NewTime(now.Add(-time.Second)),
+		OwnerReferences:   []metav1.OwnerReference{owner},
+	}}
+	client := fake.NewSimpleClientset(sibling)
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	r.annotateReplacementPod(ctx, old, now, map[string]struct{}{
+		string(old.UID):     {},
+		string(sibling.UID): {},
+	})
+	got, err := client.CoreV1().Pods("default").Get(
+		context.Background(), sibling.Name, metav1.GetOptions{},
+	)
+	require.NoError(t, err)
+	assert.Empty(t, got.Annotations)
 }
 
 func boolPtr(v bool) *bool { return &v }

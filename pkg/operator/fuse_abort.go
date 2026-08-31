@@ -88,6 +88,32 @@ func ParseFuseConnIDFromMountinfo(content, mountPath string) (string, error) {
 	return "", fmt.Errorf("fuse mountinfo entry not found for %s", mountPath)
 }
 
+func fuseConnSharedInMountinfo(content, mountPath, connID string) bool {
+	want := filepath.Clean(mountPath)
+	for _, line := range strings.Split(content, "\n") {
+		sep := strings.Index(line, " - ")
+		if sep < 0 {
+			continue
+		}
+		left := strings.Fields(line[:sep])
+		right := strings.Fields(line[sep+3:])
+		if len(left) < 5 || len(right) < 1 {
+			continue
+		}
+		if right[0] != "fuse" && !strings.HasPrefix(right[0], "fuse.") {
+			continue
+		}
+		_, minor, ok := strings.Cut(left[2], ":")
+		if !ok || minor != connID {
+			continue
+		}
+		if filepath.Clean(unescapeMountinfo(left[4])) != want {
+			return true
+		}
+	}
+	return false
+}
+
 // unescapeMountinfo decodes octal escapes used in /proc/*/mountinfo fields.
 func unescapeMountinfo(s string) string {
 	var b strings.Builder

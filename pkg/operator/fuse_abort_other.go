@@ -23,3 +23,7 @@ import "fmt"
 func resolveFuseConnID(path string) (string, error) {
 	return "", fmt.Errorf("fuse conn id lookup unsupported on this platform: %s", path)
 }
+
+func fuseConnSharedByOtherMount(string, string) (bool, error) {
+	return false, nil
+}

@@ -54,13 +54,14 @@ type Reconciler struct {
 	orphanLazyUmount       bool
 	orphanFuseAbort        bool
 	orphanKillMountProcess bool
-	lazyUmount             func(path string) error           // overridable in tests
-	resolveFuseConnID      func(path string) (string, error) // overridable in tests
-	abortFuseConn          func(id string) error             // overridable in tests
-	killMountProcess       func(path string) error           // overridable in tests
-	mu                     sync.Mutex                        // serializes pod deletes + lastRecovery
-	lastRecovery           map[string]time.Time              // RecoveryKey → last restart
-	replacementWait        time.Duration                     // best-effort wait to annotate recreated Pod
+	lazyUmount             func(path string) error             // overridable in tests
+	resolveFuseConnID      func(path string) (string, error)   // overridable in tests
+	fuseConnShared         func(path, id string) (bool, error) // overridable in tests
+	abortFuseConn          func(id string) error               // overridable in tests
+	killMountProcess       func(path string) error             // overridable in tests
+	mu                     sync.Mutex                          // serializes pod deletes + lastRecovery
+	lastRecovery           map[string]time.Time                // RecoveryKey → last restart
+	replacementWait        time.Duration                       // best-effort wait to annotate recreated Pod
 }
 
 // NewReconciler builds a node-local pod reconciler.
@@ -218,14 +219,27 @@ func (r *Reconciler) maybeLazyUmountOrphan(mount StaleMount) {
 	klog.InfoS("lazy-umounted orphan CSI mount", "podUID", mount.PodUID, "path", mount.MountPath)
 
 	if ShouldAbortOrphanFuse(r.orphanFuseAbort, false) && connID != "" {
-		abort := r.abortFuseConn
-		if abort == nil {
-			abort = AbortFuseConn
+		isShared := r.fuseConnShared
+		if isShared == nil {
+			isShared = fuseConnSharedByOtherMount
 		}
-		if err := abort(connID); err != nil {
-			klog.ErrorS(err, "orphan fuse abort failed", "connID", connID, "path", mount.MountPath)
+		shared, err := isShared(mount.MountPath, connID)
+		if err != nil {
+			klog.V(3).InfoS("orphan fuse connection sharing check failed",
+				"connID", connID, "path", mount.MountPath, "err", err)
+		} else if shared {
+			klog.V(2).InfoS("skipping abort of shared orphan fuse connection",
+				"connID", connID, "path", mount.MountPath)
 		} else {
-			klog.InfoS("aborted orphan fuse connection", "connID", connID, "path", mount.MountPath)
+			abort := r.abortFuseConn
+			if abort == nil {
+				abort = AbortFuseConn
+			}
+			if err := abort(connID); err != nil {
+				klog.ErrorS(err, "orphan fuse abort failed", "connID", connID, "path", mount.MountPath)
+			} else {
+				klog.InfoS("aborted orphan fuse connection", "connID", connID, "path", mount.MountPath)
+			}
 		}
 	}
 
@@ -322,21 +336,18 @@ func podHasProvisionerVolume(
 }
 
 func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.Time, reason, message string) error {
-	// Annotate controller owner + Event before delete (survives Pod recreate).
-	// Never annotate the dying Pod (Update races; annotation would be deleted with it).
+	// Emit before delete so the Event remains associated with the controller owner.
 	r.emitRecoveryEvents(pod, reason, message)
-	if err := r.annotateOwner(ctx, pod, now); err != nil {
-		klog.V(2).InfoS("failed to annotate recovery owner",
+	knownPodUIDs, err := r.snapshotOwnerPodUIDs(ctx, pod)
+	if err != nil {
+		klog.V(2).InfoS("failed to snapshot controller pods for replacement annotation",
 			"pod", pod.Namespace+"/"+pod.Name, "err", err)
+		knownPodUIDs = nil
 	}
-
-	r.mu.Lock()
-	r.markRecoveredLocked(pod, now)
-	r.mu.Unlock()
 
 	grace := int64(0)
 	deletePolicy := metav1.DeletePropagationBackground
-	err := r.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+	err = r.client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
 		GracePeriodSeconds: &grace,
 		PropagationPolicy:  &deletePolicy,
 	})
@@ -349,8 +360,16 @@ func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.T
 		return err
 	}
 
+	r.mu.Lock()
+	r.markRecoveredLocked(pod, now)
+	r.mu.Unlock()
+	if err := r.annotateOwner(ctx, pod, now); err != nil {
+		klog.V(2).InfoS("failed to annotate recovery owner",
+			"pod", pod.Namespace+"/"+pod.Name, "err", err)
+	}
+
 	// Best-effort: annotate the replacement Pod once the controller recreates it.
-	r.scheduleReplacementAnnotate(pod, now)
+	r.scheduleReplacementAnnotate(pod, now, knownPodUIDs)
 	return nil
 }
 

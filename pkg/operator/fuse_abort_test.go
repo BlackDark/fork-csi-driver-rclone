@@ -56,6 +56,14 @@ func TestParseFuseConnIDFromMountinfoUnescape(t *testing.T) {
 	assert.Equal(t, "12", id)
 }
 
+func TestFuseConnSharedInMountinfo(t *testing.T) {
+	path := "/var/lib/kubelet/pods/dead/volumes/kubernetes.io~csi/pvc/mount"
+	content := "10 1 0:47 / " + path + " rw - fuse.rclone rclone:bucket rw\n" +
+		"11 1 0:47 / /var/lib/kubelet/plugins/kubernetes.io/csi/driver/pv/pvc/globalmount rw - fuse.rclone rclone:bucket rw\n"
+	assert.True(t, fuseConnSharedInMountinfo(content, path, "47"))
+	assert.False(t, fuseConnSharedInMountinfo(content, path, "48"))
+}
+
 func TestShouldAbortOrphanFuse(t *testing.T) {
 	assert.True(t, ShouldAbortOrphanFuse(true, false))
 	assert.False(t, ShouldAbortOrphanFuse(true, true))

@@ -159,8 +159,29 @@ func ownedByController(pod *corev1.Pod, owner *metav1.OwnerReference) bool {
 	return false
 }
 
-// annotateReplacementPod waits for a recreated Pod with the same controller and annotates it.
-func (r *Reconciler) annotateReplacementPod(ctx context.Context, old *corev1.Pod, now time.Time) {
+func (r *Reconciler) snapshotOwnerPodUIDs(ctx context.Context, old *corev1.Pod) (map[string]struct{}, error) {
+	owner := controllerOwnerRef(old)
+	if owner == nil {
+		return nil, nil
+	}
+	pods, err := r.client.CoreV1().Pods(old.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]struct{}, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if ownedByController(pod, owner) {
+			known[string(pod.UID)] = struct{}{}
+		}
+	}
+	return known, nil
+}
+
+// annotateReplacementPod waits for a new Pod with the same controller and annotates it.
+func (r *Reconciler) annotateReplacementPod(
+	ctx context.Context, old *corev1.Pod, now time.Time, knownPodUIDs map[string]struct{},
+) {
 	owner := controllerOwnerRef(old)
 	if owner == nil {
 		return
@@ -168,7 +189,7 @@ func (r *Reconciler) annotateReplacementPod(ctx context.Context, old *corev1.Pod
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if err := r.tryAnnotateReplacementOnce(ctx, old, owner, now); err == nil {
+		if err := r.tryAnnotateReplacementOnce(ctx, old, owner, now, knownPodUIDs); err == nil {
 			return
 		}
 		select {
@@ -183,6 +204,7 @@ func (r *Reconciler) annotateReplacementPod(ctx context.Context, old *corev1.Pod
 
 func (r *Reconciler) tryAnnotateReplacementOnce(
 	ctx context.Context, old *corev1.Pod, owner *metav1.OwnerReference, now time.Time,
+	knownPodUIDs map[string]struct{},
 ) error {
 	pods, err := r.client.CoreV1().Pods(old.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -194,6 +216,9 @@ func (r *Reconciler) tryAnnotateReplacementOnce(
 			continue
 		}
 		if !ownedByController(p, owner) {
+			continue
+		}
+		if _, known := knownPodUIDs[string(p.UID)]; known {
 			continue
 		}
 		p = p.DeepCopy()
@@ -213,15 +238,20 @@ func (r *Reconciler) tryAnnotateReplacementOnce(
 	return fmt.Errorf("replacement pod not ready yet")
 }
 
-func (r *Reconciler) scheduleReplacementAnnotate(old *corev1.Pod, now time.Time) {
+func (r *Reconciler) scheduleReplacementAnnotate(
+	old *corev1.Pod, now time.Time, knownPodUIDs map[string]struct{},
+) {
 	wait := r.replacementWait
 	if wait <= 0 {
+		return
+	}
+	if knownPodUIDs == nil {
 		return
 	}
 	old = old.DeepCopy()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), wait)
 		defer cancel()
-		r.annotateReplacementPod(ctx, old, now)
+		r.annotateReplacementPod(ctx, old, now, knownPodUIDs)
 	}()
 }
