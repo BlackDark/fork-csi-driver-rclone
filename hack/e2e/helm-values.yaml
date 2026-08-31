@@ -1,7 +1,5 @@
 image:
   rclone:
-    repository: ttl.sh/csi-rclone-e2e-1783844648
-    tag: "8h"
     pullPolicy: Always
 
 node:
