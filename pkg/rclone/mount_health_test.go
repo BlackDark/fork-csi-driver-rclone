@@ -28,9 +28,12 @@ import (
 
 func TestIsMountPathCorruptedWithTimeout(t *testing.T) {
 	t.Run("hung probe returns within timeout", func(t *testing.T) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+
 		start := time.Now()
 		corrupted, reason := probeMountPathWithTimeout("/unused", 50*time.Millisecond, func(string) (bool, string) {
-			time.Sleep(5 * time.Second)
+			<-release
 			return false, ""
 		})
 		elapsed := time.Since(start)
@@ -61,6 +64,32 @@ func TestIsMountPathCorruptedWithTimeout(t *testing.T) {
 		assert.False(t, corrupted)
 		assert.Empty(t, reason)
 	})
+}
+
+func TestProbeMountPathWithTimeoutLimitsHungProbes(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	probe := func(string) (bool, string) {
+		started <- struct{}{}
+		<-release
+		return false, ""
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		probeMountPathWithTimeout("/first", 20*time.Millisecond, probe)
+		close(firstDone)
+	}()
+	<-started
+	<-firstDone
+
+	probeMountPathWithTimeout("/second", 20*time.Millisecond, probe)
+	select {
+	case <-started:
+		t.Fatal("second hung probe started instead of respecting the concurrency limit")
+	case <-time.After(50 * time.Millisecond):
+	}
 }
 
 func TestIsMountPathHealthy(t *testing.T) {

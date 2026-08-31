@@ -44,10 +44,15 @@ func IsMountPathCorrupted(path string) (bool, string) {
 
 // IsMountPathCorruptedWithTimeout is like IsMountPathCorrupted but treats a probe that
 // exceeds timeout as corrupted. A non-positive timeout falls back to the unbounded probe.
-// On timeout the underlying ReadDir goroutine may remain blocked (uninterruptible FUSE I/O).
+// At most one timed probe can be blocked in uninterruptible FUSE I/O, preventing repeated
+// scans from accumulating permanently blocked goroutines.
 func IsMountPathCorruptedWithTimeout(path string, timeout time.Duration) (bool, string) {
 	return probeMountPathWithTimeout(path, timeout, IsMountPathCorrupted)
 }
+
+const maxConcurrentTimedMountProbes = 1
+
+var timedMountProbeSlots = make(chan struct{}, maxConcurrentTimedMountProbes)
 
 // probeMountPathWithTimeout runs probe with a deadline; timeout → corrupted.
 func probeMountPathWithTimeout(
@@ -57,20 +62,29 @@ func probeMountPathWithTimeout(
 		return probe(path)
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case timedMountProbeSlots <- struct{}{}:
+	case <-timer.C:
+		return true, fmt.Sprintf("mount probe timed out after %s", timeout)
+	}
+
 	type result struct {
 		corrupted bool
 		reason    string
 	}
-	ch := make(chan result, 1)
+	resultCh := make(chan result, 1)
 	go func() {
 		corrupted, reason := probe(path)
-		ch <- result{corrupted: corrupted, reason: reason}
+		resultCh <- result{corrupted: corrupted, reason: reason}
+		<-timedMountProbeSlots
 	}()
 
 	select {
-	case res := <-ch:
+	case res := <-resultCh:
 		return res.corrupted, res.reason
-	case <-time.After(timeout):
+	case <-timer.C:
 		return true, fmt.Sprintf("mount probe timed out after %s", timeout)
 	}
 }
