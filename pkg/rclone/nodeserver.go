@@ -1067,9 +1067,15 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 		mp, mctx, cancel, err := ns.createAndMountFilesystem(
 			attemptCtx, fsPath, targetPath, mountOptions, pvp.params,
 		)
+		if cancel != nil {
+			mountCancel := cancel
+			cancel = func() {
+				mountCancel()
+				cancelAttempt()
+			}
+		}
 		resultCh <- mountResult{mountPoint: mp, mountCtx: mctx, cancel: cancel, err: err}
 	}()
-
 	timer := time.NewTimer(ns.mountTimeout())
 	defer timer.Stop()
 
@@ -1078,6 +1084,7 @@ func (ns *NodeServer) nodePublishVolumeDirect(ctx context.Context, req *csi.Node
 		if res.err != nil {
 			// Pre-timeout failure: mountSuccess stays false, so the deferred
 			// cleanupConfigRemotes frees the loaded remotes. createAndMountFilesystem
+			cancelAttempt()
 			// already cancelled its context on every error path.
 			return nil, res.err
 		}
