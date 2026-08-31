@@ -91,7 +91,7 @@ The optional **volume recovery operator** is a node-local DaemonSet that complem
 - Workloads **without** `mountPropagation: HostToContainer` cannot see a remounted kubelet path until the pod is recreated.
 - After CSI driver OOM/restart, app containers may still hold dead FUSE file descriptors even when the kubelet mount is healthy.
 
-The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node (directory publish targets included), probes mount health with a **bounded timeout** (default 3s; timeout treated as corrupted), and deletes affected workload pods so controllers recreate them. CSI-UID restart recovery and the stale-mount scan run on **independent loops** so an orphan/hung FUSE probe cannot starve CSI restart detection. When a stale publish path's pod UID is gone, the operator can **lazy-umount** it (`MNT_DETACH`, default on).
+The operator periodically scans `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` on each node (directory publish targets included), probes mount health with a **bounded timeout** (default 3s; timeout treated as corrupted), and deletes affected workload pods so controllers recreate them. CSI-UID restart recovery and the stale-mount scan run on **independent loops** so an orphan/hung FUSE probe cannot starve CSI restart detection. When a stale publish path's pod UID is gone, the operator can **lazy-umount** it (`MNT_DETACH`, default on), then **abort** that path's FUSE connection and **best-effort kill** a hung mount server so CSI node teardown is not wedged by residual userspace FUSE. The operator mounts kubelet-pods with `mountPropagation: Bidirectional` so that lazy-umount clears the host mount table (`HostToContainer` alone does not), uses `hostPID: true` for kill visibility, and mounts host `/sys/fs/fuse` RW for abort.
 
 When Phase B remount + skip-bind-refresh keeps kubelet/staging healthy while container binds stay stale, the operator is **required** for automated recovery. It watches for **CSI node pod restarts** on the same node, waits until the new CSI node pod is Ready (default 90s, then proceeds), and restarts workload pods that use rclone volumes. Container bind mounts cannot be refreshed in-place without `mountPropagation` or a pod restart.
 
@@ -102,6 +102,7 @@ When Phase B remount + skip-bind-refresh keeps kubelet/staging healthy while con
 - Only volumes backed by `rclone.csi.veloxpack.io` are acted on
 - Mount probe timeout avoids permanent wedging on zombie `fuse.rclone` under deleted pod UIDs
 - Orphan lazy-umount only when the pod UID is absent from the node (never staging `globalmount`)
+- Orphan FUSE abort / mount-process kill only after UID-gone orphan lazy-umount (never live CSI mounts)
 
 ### Deploy
 
@@ -115,6 +116,8 @@ volumeRecoveryOperator:
   # csiRestartReadyTimeout: 90s
   # mountProbeTimeout: 3s
   # orphanLazyUmount: true
+  # orphanFuseAbort: true
+  # orphanKillMountProcess: true
 ```
 
 Or apply the kustomize manifests:

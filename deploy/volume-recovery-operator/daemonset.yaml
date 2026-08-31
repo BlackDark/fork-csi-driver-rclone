@@ -60,6 +60,7 @@ spec:
       tolerations:
         - operator: Exists
       hostNetwork: true
+      hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: operator
@@ -74,6 +75,8 @@ spec:
             - --csi-restart-ready-timeout=90s
             - --mount-probe-timeout=3s
             - --orphan-lazy-umount=true
+            - --orphan-fuse-abort=true
+            - --orphan-kill-mount-process=true
             - --v=2
           env:
             - name: NODE_NAME
@@ -90,7 +93,10 @@ spec:
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
               readOnly: false
-              mountPropagation: HostToContainer
+              mountPropagation: "Bidirectional"
+            - name: fuse-connections
+              mountPath: /sys/fs/fuse
+              readOnly: false
           resources:
             requests:
               cpu: 10m
@@ -101,4 +107,8 @@ spec:
         - name: kubelet-pods
           hostPath:
             path: /var/lib/kubelet/pods
+            type: Directory
+        - name: fuse-connections
+          hostPath:
+            path: /sys/fs/fuse
             type: Directory

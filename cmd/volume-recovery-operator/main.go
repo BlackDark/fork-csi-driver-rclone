@@ -57,6 +57,14 @@ var (
 		"orphan-lazy-umount", true,
 		"Lazy-umount stale CSI publish paths when the pod UID is gone from the node",
 	)
+	orphanFuseAbort = flag.Bool(
+		"orphan-fuse-abort", true,
+		"After orphan lazy-umount, abort the FUSE connection via /sys/fs/fuse/connections/<id>/abort",
+	)
+	orphanKillMountProcess = flag.Bool(
+		"orphan-kill-mount-process", true,
+		"After orphan lazy-umount, best-effort kill hung mount server processes (requires hostPID)",
+	)
 )
 
 func main() {
@@ -84,6 +92,8 @@ func main() {
 	mounter := mount.New("" /* mounterPath */)
 	reconciler := operator.NewReconciler(client, *nodeName, *provisioner)
 	reconciler.SetOrphanLazyUmount(*orphanLazyUmount)
+	reconciler.SetOrphanFuseAbort(*orphanFuseAbort)
+	reconciler.SetOrphanKillMountProcess(*orphanKillMountProcess)
 	reconciler.SetMountProbeTimeout(*mountProbeTimeout)
 	operator.ConfigureMountProbe(*mountProbeTimeout)
 	csiTracker := operator.NewCSINodeTracker(client, *nodeName, *csiNodeLabel)
@@ -100,7 +110,9 @@ func main() {
 		"csiRestartRecovery", *csiRestartRecovery,
 		"csiRestartReadyTimeout", *csiRestartReadyTimeout,
 		"mountProbeTimeout", *mountProbeTimeout,
-		"orphanLazyUmount", *orphanLazyUmount)
+		"orphanLazyUmount", *orphanLazyUmount,
+		"orphanFuseAbort", *orphanFuseAbort,
+		"orphanKillMountProcess", *orphanKillMountProcess)
 
 	var onCSI func(context.Context)
 	if *csiRestartRecovery {

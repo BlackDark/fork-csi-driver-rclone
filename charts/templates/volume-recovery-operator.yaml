@@ -64,6 +64,7 @@ spec:
       tolerations:
         - operator: Exists
       hostNetwork: true
+      hostPID: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: operator
@@ -79,6 +80,8 @@ spec:
             - --csi-restart-ready-timeout={{ .Values.volumeRecoveryOperator.csiRestartReadyTimeout }}
             - --mount-probe-timeout={{ .Values.volumeRecoveryOperator.mountProbeTimeout }}
             - --orphan-lazy-umount={{ .Values.volumeRecoveryOperator.orphanLazyUmount }}
+            - --orphan-fuse-abort={{ .Values.volumeRecoveryOperator.orphanFuseAbort }}
+            - --orphan-kill-mount-process={{ .Values.volumeRecoveryOperator.orphanKillMountProcess }}
             - --v={{ .Values.volumeRecoveryOperator.logLevel }}
           env:
             - name: NODE_NAME
@@ -95,12 +98,19 @@ spec:
             - name: kubelet-pods
               mountPath: {{ .Values.kubeletDir }}/pods
               readOnly: false
-              mountPropagation: HostToContainer
+              mountPropagation: "Bidirectional"
+            - name: fuse-connections
+              mountPath: /sys/fs/fuse
+              readOnly: false
           resources:
             {{- toYaml .Values.volumeRecoveryOperator.resources | nindent 12 }}
       volumes:
         - name: kubelet-pods
           hostPath:
             path: {{ .Values.kubeletDir }}/pods
+            type: Directory
+        - name: fuse-connections
+          hostPath:
+            path: /sys/fs/fuse
             type: Directory
 {{- end }}

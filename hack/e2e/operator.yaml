@@ -65,12 +65,23 @@ spec:
             - --kubelet-dir=/var/lib/kubelet
             - --scan-interval=15s
             - --provisioner=rclone.csi.veloxpack.io
+            - --orphan-lazy-umount=true
+            - --orphan-fuse-abort=true
+            - --orphan-kill-mount-process=true
           volumeMounts:
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods
-              readOnly: true
+              readOnly: false
+              mountPropagation: "Bidirectional"
+            - name: fuse-connections
+              mountPath: /sys/fs/fuse
+              readOnly: false
       volumes:
         - name: kubelet-pods
           hostPath:
             path: /var/lib/kubelet/pods
+            type: Directory
+        - name: fuse-connections
+          hostPath:
+            path: /sys/fs/fuse
             type: Directory

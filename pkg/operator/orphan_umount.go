@@ -23,6 +23,8 @@ func ShouldLazyUmountOrphan(orphanLazyUmountEnabled, podFound bool) bool {
 }
 
 // LazyUmount detaches path with MNT_DETACH (lazy). No-op-friendly for missing mounts.
+// After a successful orphan lazy-umount, the reconciler may abort the FUSE connection
+// and best-effort kill the mount server (see fuse_abort.go / orphan_kill.go).
 func LazyUmount(path string) error {
 	return lazyUmount(path)
 }

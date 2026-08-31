@@ -146,3 +146,155 @@ func TestReconcileStaleMountsSkipsLazyUmountWhenDisabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, called)
 }
+
+func TestReconcileStaleMountsAbortAndKillOnOrphan(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(true)
+	r.SetOrphanFuseAbort(true)
+	r.SetOrphanKillMountProcess(true)
+
+	orphanPath := "/var/lib/kubelet/pods/dead-uid/volumes/kubernetes.io~csi/data/mount"
+	var (
+		resolved []string
+		umounted []string
+		aborted  []string
+		killed   []string
+	)
+	r.resolveFuseConnID = func(path string) (string, error) {
+		resolved = append(resolved, path)
+		return "47", nil
+	}
+	r.lazyUmount = func(path string) error {
+		umounted = append(umounted, path)
+		return nil
+	}
+	r.abortFuseConn = func(id string) error {
+		aborted = append(aborted, id)
+		return nil
+	}
+	r.killMountProcess = func(path string) error {
+		killed = append(killed, path)
+		return nil
+	}
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID:     "dead-uid",
+		VolumeName: "data",
+		MountPath:  orphanPath,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{orphanPath}, resolved)
+	assert.Equal(t, []string{orphanPath}, umounted)
+	assert.Equal(t, []string{"47"}, aborted)
+	assert.Equal(t, []string{orphanPath}, killed)
+	// resolve must happen before umount (captured order via sequential appends in maybeLazyUmountOrphan)
+	require.Len(t, resolved, 1)
+	require.Len(t, umounted, 1)
+}
+
+func TestReconcileStaleMountsSkipsAbortKillWhenFlagsOff(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(true)
+	r.SetOrphanFuseAbort(false)
+	r.SetOrphanKillMountProcess(false)
+
+	abortCalled := false
+	killCalled := false
+	r.resolveFuseConnID = func(string) (string, error) { return "9", nil }
+	r.lazyUmount = func(string) error { return nil }
+	r.abortFuseConn = func(string) error { abortCalled = true; return nil }
+	r.killMountProcess = func(string) error { killCalled = true; return nil }
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID: "dead-uid", VolumeName: "data", MountPath: "/mnt/orphan",
+	}})
+	require.NoError(t, err)
+	assert.False(t, abortCalled)
+	assert.False(t, killCalled)
+}
+
+func TestReconcileStaleMountsNoAbortKillForLivePod(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: "default", UID: "live-uid"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					CSI: &corev1.CSIVolumeSource{Driver: "rclone.csi.veloxpack.io"},
+				},
+			}},
+		},
+	}
+	client := fake.NewSimpleClientset(pod)
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(true)
+	r.SetOrphanFuseAbort(true)
+	r.SetOrphanKillMountProcess(true)
+	r.confirmCorrupted = func(string) (bool, string) { return false, "" }
+
+	abortCalled := false
+	killCalled := false
+	umountCalled := false
+	r.resolveFuseConnID = func(string) (string, error) { return "1", nil }
+	r.lazyUmount = func(string) error { umountCalled = true; return nil }
+	r.abortFuseConn = func(string) error { abortCalled = true; return nil }
+	r.killMountProcess = func(string) error { killCalled = true; return nil }
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID: "live-uid", VolumeName: "data",
+		MountPath: "/var/lib/kubelet/pods/live-uid/volumes/kubernetes.io~csi/data/mount",
+	}})
+	require.NoError(t, err)
+	assert.False(t, umountCalled)
+	assert.False(t, abortCalled)
+	assert.False(t, killCalled)
+}
+
+func TestReconcileStaleMountsSkipsAbortWhenLookupFails(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(true)
+	r.SetOrphanFuseAbort(true)
+	r.SetOrphanKillMountProcess(true)
+
+	abortCalled := false
+	killCalled := false
+	r.resolveFuseConnID = func(string) (string, error) {
+		return "", assert.AnError
+	}
+	r.lazyUmount = func(string) error { return nil }
+	r.abortFuseConn = func(string) error { abortCalled = true; return nil }
+	r.killMountProcess = func(string) error { killCalled = true; return nil }
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID: "dead-uid", VolumeName: "data", MountPath: "/mnt/orphan",
+	}})
+	require.NoError(t, err)
+	assert.False(t, abortCalled)
+	assert.True(t, killCalled)
+}
+
+func TestReconcileStaleMountsNoAbortKillWhenUmountFails(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	r := NewReconciler(client, "node-1", "rclone.csi.veloxpack.io")
+	r.SetOrphanLazyUmount(true)
+	r.SetOrphanFuseAbort(true)
+	r.SetOrphanKillMountProcess(true)
+
+	abortCalled := false
+	killCalled := false
+	r.resolveFuseConnID = func(string) (string, error) { return "47", nil }
+	r.lazyUmount = func(string) error { return assert.AnError }
+	r.abortFuseConn = func(string) error { abortCalled = true; return nil }
+	r.killMountProcess = func(string) error { killCalled = true; return nil }
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID: "dead-uid", VolumeName: "data", MountPath: "/mnt/orphan",
+	}})
+	require.NoError(t, err)
+	assert.False(t, abortCalled)
+	assert.False(t, killCalled)
+}

@@ -39,14 +39,19 @@ const (
 
 // Reconciler restarts workload pods with stale rclone CSI bind mounts.
 type Reconciler struct {
-	client           kubernetes.Interface
-	nodeName         string
-	provisioner      string
-	cooldown         time.Duration
-	confirmCorrupted func(path string) (bool, string)
-	orphanLazyUmount bool
-	lazyUmount       func(path string) error // overridable in tests
-	mu               sync.Mutex              // serializes pod deletes across CSI + scan loops
+	client                 kubernetes.Interface
+	nodeName               string
+	provisioner            string
+	cooldown               time.Duration
+	confirmCorrupted       func(path string) (bool, string)
+	orphanLazyUmount       bool
+	orphanFuseAbort        bool
+	orphanKillMountProcess bool
+	lazyUmount             func(path string) error           // overridable in tests
+	resolveFuseConnID      func(path string) (string, error) // overridable in tests
+	abortFuseConn          func(id string) error             // overridable in tests
+	killMountProcess       func(path string) error           // overridable in tests
+	mu                     sync.Mutex                        // serializes pod deletes across CSI + scan loops
 }
 
 // NewReconciler builds a node-local pod reconciler.
@@ -63,6 +68,16 @@ func NewReconciler(client kubernetes.Interface, nodeName, provisioner string) *R
 // SetOrphanLazyUmount enables lazy-umount of stale CSI publish paths whose pod UID is gone.
 func (r *Reconciler) SetOrphanLazyUmount(enabled bool) {
 	r.orphanLazyUmount = enabled
+}
+
+// SetOrphanFuseAbort enables abort of the FUSE connection after orphan lazy-umount.
+func (r *Reconciler) SetOrphanFuseAbort(enabled bool) {
+	r.orphanFuseAbort = enabled
+}
+
+// SetOrphanKillMountProcess enables best-effort kill of hung mount servers after orphan umount.
+func (r *Reconciler) SetOrphanKillMountProcess(enabled bool) {
+	r.orphanKillMountProcess = enabled
 }
 
 // SetMountProbeTimeout sets the confirm probe used before pod restart.
@@ -156,6 +171,19 @@ func (r *Reconciler) maybeLazyUmountOrphan(mount StaleMount) {
 	if !ShouldLazyUmountOrphan(r.orphanLazyUmount, false) {
 		return
 	}
+
+	// Capture FUSE conn id before umount removes the mountinfo row.
+	var connID string
+	resolve := r.resolveFuseConnID
+	if resolve == nil {
+		resolve = ResolveFuseConnID
+	}
+	if id, err := resolve(mount.MountPath); err != nil {
+		klog.V(3).InfoS("orphan fuse conn id lookup failed", "path", mount.MountPath, "err", err)
+	} else {
+		connID = id
+	}
+
 	umount := r.lazyUmount
 	if umount == nil {
 		umount = LazyUmount
@@ -165,6 +193,28 @@ func (r *Reconciler) maybeLazyUmountOrphan(mount StaleMount) {
 		return
 	}
 	klog.InfoS("lazy-umounted orphan CSI mount", "podUID", mount.PodUID, "path", mount.MountPath)
+
+	if ShouldAbortOrphanFuse(r.orphanFuseAbort, false) && connID != "" {
+		abort := r.abortFuseConn
+		if abort == nil {
+			abort = AbortFuseConn
+		}
+		if err := abort(connID); err != nil {
+			klog.ErrorS(err, "orphan fuse abort failed", "connID", connID, "path", mount.MountPath)
+		} else {
+			klog.InfoS("aborted orphan fuse connection", "connID", connID, "path", mount.MountPath)
+		}
+	}
+
+	if ShouldKillOrphanMountProcess(r.orphanKillMountProcess, false) {
+		kill := r.killMountProcess
+		if kill == nil {
+			kill = BestEffortKillMountServer
+		}
+		if err := kill(mount.MountPath); err != nil {
+			klog.ErrorS(err, "orphan mount process kill failed", "path", mount.MountPath)
+		}
+	}
 }
 
 // ReconcileWorkloadPodsAfterCSIRestart restarts workload pods using rclone volumes after a CSI node restart.

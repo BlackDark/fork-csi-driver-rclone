@@ -63,6 +63,10 @@ volumeRecoveryOperator:
   mountProbeTimeout: 3s
   # Lazy-umount stale CSI publish paths when the pod UID is gone from the node.
   orphanLazyUmount: true
+  # After orphan lazy-umount, abort the FUSE connection (requires /sys/fs/fuse hostPath).
+  orphanFuseAbort: true
+  # After orphan lazy-umount, best-effort kill hung mount servers (requires hostPID).
+  orphanKillMountProcess: true
   provisioner: rclone.csi.veloxpack.io
   logLevel: 2
   image:
