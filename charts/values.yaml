@@ -53,6 +53,12 @@ volumeRecoveryOperator:
   enabled: false
   name: volume-recovery-operator
   scanInterval: 60s
+  # Restart rclone workload pods when the CSI node pod UID changes on this node.
+  csiRestartRecovery: true
+  # Label selector for CSI node pods. Empty uses app={{ node.name }}.
+  csiNodeLabel: ""
+  # Max wait for CSI node Ready after restart before deleting workloads.
+  csiRestartReadyTimeout: 90s
   provisioner: rclone.csi.veloxpack.io
   logLevel: 2
   image:

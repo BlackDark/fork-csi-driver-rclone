@@ -1,5 +1,3 @@
-//go:build integration
-
 /*
 Copyright 2025 Veloxpack.io
 
@@ -21,12 +19,14 @@ package operator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -75,6 +75,68 @@ func TestCSINodeTrackerDetectsRestart(t *testing.T) {
 	restarted, err := tracker.CheckRestarted(context.Background())
 	require.NoError(t, err)
 	assert.True(t, restarted)
+}
+
+func TestWaitUntilReadyWhenAlreadyReady(t *testing.T) {
+	pod := readyCSINodePod("csi-rclone-node-abc", "uid-1", true)
+	client := fake.NewSimpleClientset(pod)
+	tracker := NewCSINodeTracker(client, "node-1", "app=csi-rclone-node")
+	tracker.readyPoll = 10 * time.Millisecond
+
+	err := tracker.WaitUntilReady(context.Background(), time.Second)
+	require.NoError(t, err)
+}
+
+func TestWaitUntilReadySucceedsAfterBecomingReady(t *testing.T) {
+	pod := readyCSINodePod("csi-rclone-node-abc", "uid-1", false)
+	client := fake.NewSimpleClientset(pod)
+	tracker := NewCSINodeTracker(client, "node-1", "app=csi-rclone-node")
+	tracker.readyPoll = 10 * time.Millisecond
+
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		updated := readyCSINodePod("csi-rclone-node-abc", "uid-1", true)
+		updated.ResourceVersion = "2"
+		_, err := client.CoreV1().Pods("system").Update(context.Background(), updated, metav1.UpdateOptions{})
+		require.NoError(t, err)
+	}()
+
+	err := tracker.WaitUntilReady(context.Background(), time.Second)
+	require.NoError(t, err)
+}
+
+func TestWaitUntilReadyTimeoutProceeds(t *testing.T) {
+	pod := readyCSINodePod("csi-rclone-node-abc", "uid-1", false)
+	client := fake.NewSimpleClientset(pod)
+	tracker := NewCSINodeTracker(client, "node-1", "app=csi-rclone-node")
+	tracker.readyPoll = 10 * time.Millisecond
+
+	start := time.Now()
+	err := tracker.WaitUntilReady(context.Background(), 50*time.Millisecond)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond)
+}
+
+func TestWaitUntilReadyContextCancel(t *testing.T) {
+	pod := readyCSINodePod("csi-rclone-node-abc", "uid-1", false)
+	client := fake.NewSimpleClientset(pod)
+	tracker := NewCSINodeTracker(client, "node-1", "app=csi-rclone-node")
+	tracker.readyPoll = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	err := tracker.WaitUntilReady(ctx, time.Second)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestIsPodReady(t *testing.T) {
+	assert.False(t, isPodReady(nil))
+	assert.False(t, isPodReady(readyCSINodePod("p", "u", false)))
+	assert.True(t, isPodReady(readyCSINodePod("p", "u", true)))
 }
 
 func TestReconcileWorkloadPodsAfterCSIRestart(t *testing.T) {
@@ -128,4 +190,27 @@ func TestReconcileWorkloadPodsAfterCSIRestart(t *testing.T) {
 	assert.Error(t, err)
 	_, err = client.CoreV1().Pods("system").Get(context.Background(), "csi-rclone-node-abc", metav1.GetOptions{})
 	require.NoError(t, err)
+}
+
+func readyCSINodePod(name, uid string, ready bool) *corev1.Pod {
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "system",
+			UID:               types.UID(uid),
+			Labels:            map[string]string{"app": "csi-rclone-node"},
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: status,
+			}},
+		},
+	}
 }

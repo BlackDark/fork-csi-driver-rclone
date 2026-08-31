@@ -74,6 +74,9 @@ spec:
             - --kubelet-dir={{ .Values.kubeletDir }}
             - --provisioner={{ .Values.volumeRecoveryOperator.provisioner }}
             - --scan-interval={{ .Values.volumeRecoveryOperator.scanInterval }}
+            - --csi-restart-recovery={{ .Values.volumeRecoveryOperator.csiRestartRecovery }}
+            - --csi-node-label={{ default (printf "app=%s" .Values.node.name) .Values.volumeRecoveryOperator.csiNodeLabel }}
+            - --csi-restart-ready-timeout={{ .Values.volumeRecoveryOperator.csiRestartReadyTimeout }}
             - --v={{ .Values.volumeRecoveryOperator.logLevel }}
           env:
             - name: NODE_NAME

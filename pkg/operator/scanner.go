@@ -32,6 +32,9 @@ const (
 	mountDirName        = "mount"
 )
 
+// mountPathCorruptedProbe is overridable in tests.
+var mountPathCorruptedProbe = rclone.IsMountPathCorrupted
+
 // StaleMount describes an unhealthy CSI mount discovered on the node.
 type StaleMount struct {
 	PodUID     string
@@ -86,27 +89,27 @@ func ScanStaleMounts(kubeletDir string, mounter mount.Interface) ([]StaleMount, 
 			klog.V(4).InfoS("skipping path during stale mount scan", "path", path, "err", walkErr)
 			return nil
 		}
-		if d.IsDir() || filepath.Base(path) != mountDirName {
+		// CSI publish targets are directories named "mount". Never descend into them
+		// (that walks the FUSE tree and can stall the operator loop).
+		if !d.IsDir() || filepath.Base(path) != mountDirName {
 			return nil
 		}
 
 		podUID, volumeName, ok := ParseCSIMountPath(path)
 		if !ok {
-			return nil
+			return filepath.SkipDir
 		}
 
-		corrupted, reason := rclone.IsMountPathCorrupted(path)
-		if !corrupted {
-			return nil
+		corrupted, reason := mountPathCorruptedProbe(path)
+		if corrupted {
+			klog.V(3).InfoS("found stale CSI mount", "path", path, "podUID", podUID, "volume", volumeName, "reason", reason)
+			stale = append(stale, StaleMount{
+				PodUID:     podUID,
+				VolumeName: volumeName,
+				MountPath:  path,
+			})
 		}
-
-		klog.V(3).InfoS("found stale CSI mount", "path", path, "podUID", podUID, "volume", volumeName, "reason", reason)
-		stale = append(stale, StaleMount{
-			PodUID:     podUID,
-			VolumeName: volumeName,
-			MountPath:  path,
-		})
-		return nil
+		return filepath.SkipDir
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scan kubelet mounts under %s: %w", podsDir, err)

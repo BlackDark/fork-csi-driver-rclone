@@ -41,7 +41,11 @@ var (
 		"csi-node-label", operator.DefaultCSINodeLabelSelector(),
 		"Label selector for CSI node pods",
 	)
-	csiRestartRecovery = flag.Bool("csi-restart-recovery", true, "Restart workload pods when the CSI node pod restarts")
+	csiRestartRecovery     = flag.Bool("csi-restart-recovery", true, "Restart workload pods when the CSI node pod restarts")
+	csiRestartReadyTimeout = flag.Duration(
+		"csi-restart-ready-timeout", operator.DefaultCSIRestartReadyTimeout(),
+		"Max wait for CSI node pod Ready after a restart before deleting workloads",
+	)
 )
 
 func main() {
@@ -79,7 +83,8 @@ func main() {
 		"provisioner", *provisioner,
 		"scanInterval", *scanInterval,
 		"csiNodeLabel", *csiNodeLabel,
-		"csiRestartRecovery", *csiRestartRecovery)
+		"csiRestartRecovery", *csiRestartRecovery,
+		"csiRestartReadyTimeout", *csiRestartReadyTimeout)
 
 	ticker := time.NewTicker(*scanInterval)
 	defer ticker.Stop()
@@ -90,7 +95,9 @@ func main() {
 			if err != nil {
 				klog.ErrorS(err, "CSI node restart check failed")
 			} else if restarted {
-				if err := reconciler.ReconcileWorkloadPodsAfterCSIRestart(ctx); err != nil {
+				if err := csiTracker.WaitUntilReady(ctx, *csiRestartReadyTimeout); err != nil {
+					klog.ErrorS(err, "waiting for CSI node Ready failed; skipping CSI restart recovery")
+				} else if err := reconciler.ReconcileWorkloadPodsAfterCSIRestart(ctx); err != nil {
 					klog.ErrorS(err, "CSI restart workload recovery failed")
 				}
 			}

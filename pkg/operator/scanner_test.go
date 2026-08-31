@@ -104,3 +104,29 @@ func TestScanStaleMountsSkipsHealthyPaths(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, stale)
 }
+
+func TestScanStaleMountsDetectsCorruptedDirectoryMount(t *testing.T) {
+	kubeletDir := t.TempDir()
+	podUID := "pod-uid-corrupt"
+	volumeName := "data"
+	mountPath := filepath.Join(kubeletDir, "pods", podUID, "volumes", "kubernetes.io~csi", volumeName, "mount")
+	require.NoError(t, os.MkdirAll(mountPath, 0o755))
+	// Child would only be visited if WalkDir incorrectly descends into the mount dir.
+	require.NoError(t, os.WriteFile(filepath.Join(mountPath, "should-not-walk"), []byte("x"), 0o644))
+
+	oldProbe := mountPathCorruptedProbe
+	mountPathCorruptedProbe = func(path string) (bool, string) {
+		if path == mountPath {
+			return true, "mount point corrupted: transport endpoint is not connected"
+		}
+		return false, ""
+	}
+	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
+
+	stale, err := ScanStaleMounts(kubeletDir, mount.New(""))
+	require.NoError(t, err)
+	require.Len(t, stale, 1)
+	assert.Equal(t, podUID, stale[0].PodUID)
+	assert.Equal(t, volumeName, stale[0].VolumeName)
+	assert.Equal(t, mountPath, stale[0].MountPath)
+}

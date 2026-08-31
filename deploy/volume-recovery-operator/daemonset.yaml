@@ -69,6 +69,9 @@ spec:
             - --kubelet-dir=/var/lib/kubelet
             - --provisioner=rclone.csi.veloxpack.io
             - --scan-interval=60s
+            - --csi-restart-recovery=true
+            - --csi-node-label=app=csi-rclone-node
+            - --csi-restart-ready-timeout=90s
             - --v=2
           env:
             - name: NODE_NAME

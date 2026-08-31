@@ -19,6 +19,7 @@ package operator
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,11 +27,20 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const defaultCSINodeLabelSelector = "app=csi-rclone-node"
+const (
+	defaultCSINodeLabelSelector = "app=csi-rclone-node"
+	defaultCSIReadyPollInterval = time.Second
+	defaultCSIReadyTimeout      = 90 * time.Second
+)
 
 // DefaultCSINodeLabelSelector returns the default label selector for CSI node pods.
 func DefaultCSINodeLabelSelector() string {
 	return defaultCSINodeLabelSelector
+}
+
+// DefaultCSIRestartReadyTimeout returns the default wait for CSI node Ready after a restart.
+func DefaultCSIRestartReadyTimeout() time.Duration {
+	return defaultCSIReadyTimeout
 }
 
 // CSINodeTracker detects when the local CSI node pod restarts.
@@ -40,6 +50,7 @@ type CSINodeTracker struct {
 	labelSelector string
 	lastUID       string
 	initialized   bool
+	readyPoll     time.Duration // overridable in tests; zero uses defaultCSIReadyPollInterval
 }
 
 // NewCSINodeTracker builds a tracker for CSI node pod restarts on this node.
@@ -57,13 +68,14 @@ func NewCSINodeTracker(client kubernetes.Interface, nodeName, labelSelector stri
 // CheckRestarted reports whether the CSI node pod UID changed since the last check.
 // The first successful observation seeds state and does not count as a restart.
 func (t *CSINodeTracker) CheckRestarted(ctx context.Context) (bool, error) {
-	uid, err := t.currentCSINodeUID(ctx)
+	pod, err := t.newestCSINodePod(ctx)
 	if err != nil {
 		return false, err
 	}
-	if uid == "" {
+	if pod == nil {
 		return false, nil
 	}
+	uid := string(pod.UID)
 
 	if !t.initialized {
 		t.lastUID = uid
@@ -80,13 +92,53 @@ func (t *CSINodeTracker) CheckRestarted(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func (t *CSINodeTracker) currentCSINodeUID(ctx context.Context) (string, error) {
+// WaitUntilReady waits until the newest CSI node pod on this node is Ready.
+// On timeout it logs a warning and returns nil so workload recovery can proceed.
+// Context cancellation returns ctx.Err() without proceeding.
+func (t *CSINodeTracker) WaitUntilReady(ctx context.Context, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = defaultCSIReadyTimeout
+	}
+	poll := t.readyPoll
+	if poll <= 0 {
+		poll = defaultCSIReadyPollInterval
+	}
+
+	klog.InfoS("waiting for CSI node pod Ready", "node", t.nodeName, "timeout", timeout)
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	for {
+		pod, err := t.newestCSINodePod(ctx)
+		if err != nil {
+			klog.V(4).InfoS("CSI node Ready check list failed", "node", t.nodeName, "err", err)
+		} else if pod != nil && isPodReady(pod) {
+			klog.InfoS("CSI node pod is Ready", "node", t.nodeName, "pod", pod.Name, "uid", pod.UID)
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			klog.InfoS("timed out waiting for CSI node pod Ready; proceeding with workload recovery",
+				"node", t.nodeName, "timeout", timeout)
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (t *CSINodeTracker) newestCSINodePod(ctx context.Context) (*corev1.Pod, error) {
 	pods, err := t.client.CoreV1().Pods("").List(ctx, metav1.ListOptions{
 		FieldSelector: "spec.nodeName=" + t.nodeName,
 		LabelSelector: t.labelSelector,
 	})
 	if err != nil {
-		return "", fmt.Errorf("list CSI node pods on %s: %w", t.nodeName, err)
+		return nil, fmt.Errorf("list CSI node pods on %s: %w", t.nodeName, err)
 	}
 
 	var chosen *corev1.Pod
@@ -96,8 +148,17 @@ func (t *CSINodeTracker) currentCSINodeUID(ctx context.Context) (string, error) 
 			chosen = pod
 		}
 	}
-	if chosen == nil {
-		return "", nil
+	return chosen, nil
+}
+
+func isPodReady(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
 	}
-	return string(chosen.UID), nil
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
