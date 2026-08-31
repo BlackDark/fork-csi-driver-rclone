@@ -18,6 +18,7 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -49,6 +50,7 @@ type CSINodeTracker struct {
 	nodeName      string
 	labelSelector string
 	lastUID       string
+	pendingUID    string
 	initialized   bool
 	readyPoll     time.Duration // overridable in tests; zero uses defaultCSIReadyPollInterval
 }
@@ -87,9 +89,21 @@ func (t *CSINodeTracker) CheckRestarted(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	klog.InfoS("CSI node pod restart detected", "node", t.nodeName, "previousUID", t.lastUID, "currentUID", uid)
-	t.lastUID = uid
+	if t.pendingUID != uid {
+		klog.InfoS("CSI node pod restart detected", "node", t.nodeName,
+			"previousUID", t.lastUID, "currentUID", uid)
+		t.pendingUID = uid
+	}
 	return true, nil
+}
+
+// AcknowledgeRestart records a successfully recovered CSI node pod restart.
+func (t *CSINodeTracker) AcknowledgeRestart() {
+	if t.pendingUID == "" {
+		return
+	}
+	t.lastUID = t.pendingUID
+	t.pendingUID = ""
 }
 
 // WaitUntilReady waits until the newest CSI node pod on this node is Ready.
@@ -104,29 +118,37 @@ func (t *CSINodeTracker) WaitUntilReady(ctx context.Context, timeout time.Durati
 		poll = defaultCSIReadyPollInterval
 	}
 
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	klog.InfoS("waiting for CSI node pod Ready", "node", t.nodeName, "timeout", timeout)
-	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
 	for {
-		pod, err := t.newestCSINodePod(ctx)
+		pod, err := t.newestCSINodePod(readyCtx)
 		if err != nil {
+			if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+				klog.InfoS("timed out waiting for CSI node pod Ready; proceeding with workload recovery",
+					"node", t.nodeName, "timeout", timeout)
+				return nil
+			}
+			if readyCtx.Err() != nil {
+				return readyCtx.Err()
+			}
 			klog.V(4).InfoS("CSI node Ready check list failed", "node", t.nodeName, "err", err)
 		} else if pod != nil && isPodReady(pod) {
 			klog.InfoS("CSI node pod is Ready", "node", t.nodeName, "pod", pod.Name, "uid", pod.UID)
 			return nil
 		}
 
-		if time.Now().After(deadline) {
-			klog.InfoS("timed out waiting for CSI node pod Ready; proceeding with workload recovery",
-				"node", t.nodeName, "timeout", timeout)
-			return nil
-		}
-
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-readyCtx.Done():
+			if errors.Is(readyCtx.Err(), context.DeadlineExceeded) {
+				klog.InfoS("timed out waiting for CSI node pod Ready; proceeding with workload recovery",
+					"node", t.nodeName, "timeout", timeout)
+				return nil
+			}
+			return readyCtx.Err()
 		case <-ticker.C:
 		}
 	}

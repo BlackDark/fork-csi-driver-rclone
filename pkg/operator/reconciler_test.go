@@ -414,7 +414,14 @@ func TestReconcileStaleMountsEmitsEventBeforeDelete(t *testing.T) {
 	require.NoError(t, writeVolData(filepath.Dir(mountPath), provisioner))
 
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: "default", UID: "live-uid"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "writer",
+			Namespace: "default",
+			UID:       "live-uid",
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet", Name: "writer", Controller: boolPtr(true),
+			}},
+		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-1",
 			Volumes: []corev1.Volume{{
@@ -460,8 +467,15 @@ func TestReconcileWorkloadPodsAfterCSIRestartUsesLocalVolData(t *testing.T) {
 	require.NoError(t, writeVolData(volDir, provisioner))
 
 	ours := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: "default", UID: types.UID(podUID)},
-		Spec:       corev1.PodSpec{NodeName: "node-1"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "writer",
+			Namespace: "default",
+			UID:       types.UID(podUID),
+			OwnerReferences: []metav1.OwnerReference{{
+				Kind: "ReplicaSet", Name: "writer", Controller: boolPtr(true),
+			}},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
 	}
 	foreign := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "media", Namespace: "media", UID: "cccc-dddd"},

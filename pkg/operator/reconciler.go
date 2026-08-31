@@ -163,8 +163,10 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 			klog.V(2).InfoS("rate limited stale mount recovery", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
-
-		corrupted, reason := r.isMountCorrupted(mount.MountPath)
+		corrupted, reason := false, mount.Reason
+		if !strings.HasPrefix(reason, "mount probe timed out after ") {
+			corrupted, reason = r.isMountCorrupted(mount.MountPath)
+		}
 		if !corrupted {
 			klog.V(3).InfoS(
 				"skipping pod restart, mount recovered before reconcile",

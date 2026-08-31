@@ -76,6 +76,9 @@ func main() {
 	_ = flag.Set("logtostderr", "true")
 	flag.Parse()
 
+	if *scanInterval <= 0 {
+		klog.Fatal("scan interval must be positive")
+	}
 	if *nodeName == "" {
 		*nodeName = os.Getenv("NODE_NAME")
 	}
@@ -143,7 +146,9 @@ func main() {
 			}
 			if err := reconciler.ReconcileWorkloadPodsAfterCSIRestart(ctx); err != nil {
 				klog.ErrorS(err, "CSI restart workload recovery failed")
+				return
 			}
+			csiTracker.AcknowledgeRestart()
 		}
 	}
 

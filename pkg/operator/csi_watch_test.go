@@ -77,6 +77,31 @@ func TestCSINodeTrackerDetectsRestart(t *testing.T) {
 	assert.True(t, restarted)
 }
 
+func TestCSINodeTrackerRetriesUntilRestartAcknowledged(t *testing.T) {
+	oldPod := readyCSINodePod("csi-rclone-node-abc", "uid-1", true)
+	client := fake.NewSimpleClientset(oldPod)
+	tracker := NewCSINodeTracker(client, "node-1", "app=csi-rclone-node")
+	_, err := tracker.CheckRestarted(context.Background())
+	require.NoError(t, err)
+
+	newPod := readyCSINodePod("csi-rclone-node-abc", "uid-2", true)
+	newPod.ResourceVersion = "2"
+	_, err = client.CoreV1().Pods("system").Update(context.Background(), newPod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	restarted, err := tracker.CheckRestarted(context.Background())
+	require.NoError(t, err)
+	assert.True(t, restarted)
+	restarted, err = tracker.CheckRestarted(context.Background())
+	require.NoError(t, err)
+	assert.True(t, restarted)
+
+	tracker.AcknowledgeRestart()
+	restarted, err = tracker.CheckRestarted(context.Background())
+	require.NoError(t, err)
+	assert.False(t, restarted)
+}
+
 func TestWaitUntilReadyWhenAlreadyReady(t *testing.T) {
 	pod := readyCSINodePod("csi-rclone-node-abc", "uid-1", true)
 	client := fake.NewSimpleClientset(pod)
@@ -156,6 +181,9 @@ func TestReconcileWorkloadPodsAfterCSIRestart(t *testing.T) {
 				Name:      "writer",
 				Namespace: "default",
 				UID:       "workload-uid",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "ReplicaSet", Name: "writer", Controller: boolPtr(true),
+				}},
 			},
 			Spec: corev1.PodSpec{
 				NodeName: "node-1",

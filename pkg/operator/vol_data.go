@@ -73,19 +73,21 @@ func PodHasLocalProvisionerVolume(kubeletDir, podUID, provisioner string) (has, 
 		}
 		return false, false
 	}
+	unreadable := false
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		driver, err := ReadCSIDriverName(filepath.Join(csiDir, e.Name()))
 		if err != nil {
+			unreadable = true
 			continue
 		}
 		if driver == provisioner {
 			return true, true
 		}
 	}
-	return false, true
+	return false, !unreadable
 }
 
 // IsRcloneFUSEMount reports whether path is currently mounted as fuse.rclone.
