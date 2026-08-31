@@ -26,8 +26,12 @@ import (
 
 	"github.com/veloxpack/csi-driver-rclone/pkg/operator"
 	"github.com/veloxpack/csi-driver-rclone/pkg/rclone"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	mount "k8s.io/mount-utils"
 )
@@ -90,7 +94,15 @@ func main() {
 	}
 
 	mounter := mount.New("" /* mounterPath */)
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartStructuredLogging(0)
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: client.CoreV1().Events("")})
+	defer eventBroadcaster.Shutdown()
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "volume-recovery-operator"})
+
 	reconciler := operator.NewReconciler(client, *nodeName, *provisioner)
+	reconciler.SetEventRecorder(recorder)
+	reconciler.SetKubeletDir(*kubeletDir)
 	reconciler.SetOrphanLazyUmount(*orphanLazyUmount)
 	reconciler.SetOrphanFuseAbort(*orphanFuseAbort)
 	reconciler.SetOrphanKillMountProcess(*orphanKillMountProcess)
@@ -139,13 +151,13 @@ func main() {
 		Interval: *scanInterval,
 		OnCSI:    onCSI,
 		OnScan: func(ctx context.Context) {
-			stale, err := operator.ScanStaleMounts(*kubeletDir, mounter)
+			stale, err := operator.ScanStaleMounts(*kubeletDir, mounter, *provisioner)
 			if err != nil {
 				klog.ErrorS(err, "stale mount scan failed")
 				return
 			}
 			if len(stale) > 0 {
-				klog.InfoS("stale mounts detected", "count", len(stale))
+				klog.V(2).InfoS("stale mounts detected", "count", len(stale))
 			}
 			if err := reconciler.ReconcileStaleMounts(ctx, stale); err != nil {
 				klog.ErrorS(err, "stale mount reconciliation failed")

@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
 
@@ -34,14 +35,21 @@ const (
 	// RecoveryAnnotation records the last time a pod was restarted for stale mount recovery.
 	RecoveryAnnotation = "volume.veloxpack.io/last-recovery"
 
+	// EventReasonStaleCSIMount is emitted before force-deleting a pod for a stale mount.
+	EventReasonStaleCSIMount = "StaleCSIMount"
+	// EventReasonCSINodeUIDChanged is emitted before force-deleting a pod after CSI node restart.
+	EventReasonCSINodeUIDChanged = "CSINodeUIDChanged"
+
 	defaultRecoveryCooldown = time.Hour
 )
 
 // Reconciler restarts workload pods with stale rclone CSI bind mounts.
 type Reconciler struct {
 	client                 kubernetes.Interface
+	recorder               record.EventRecorder
 	nodeName               string
 	provisioner            string
+	kubeletDir             string
 	cooldown               time.Duration
 	confirmCorrupted       func(path string) (bool, string)
 	orphanLazyUmount       bool
@@ -63,6 +71,16 @@ func NewReconciler(client kubernetes.Interface, nodeName, provisioner string) *R
 		cooldown:    defaultRecoveryCooldown,
 		lazyUmount:  LazyUmount,
 	}
+}
+
+// SetEventRecorder sets the Kubernetes Event recorder used before pod restarts.
+func (r *Reconciler) SetEventRecorder(recorder record.EventRecorder) {
+	r.recorder = recorder
+}
+
+// SetKubeletDir sets the kubelet root used for local vol_data.json ownership checks.
+func (r *Reconciler) SetKubeletDir(dir string) {
+	r.kubeletDir = dir
 }
 
 // SetOrphanLazyUmount enables lazy-umount of stale CSI publish paths whose pod UID is gone.
@@ -131,14 +149,14 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 			continue
 		}
 
-		if !podUsesProvisionerVolume(ctx, r.client, pod, mount.VolumeName, r.provisioner) {
+		if !r.volumeManagedByProvisioner(ctx, pod, mount) {
 			klog.V(4).InfoS("skipping pod volume not managed by provisioner",
 				"pod", pod.Namespace+"/"+pod.Name, "volume", mount.VolumeName, "provisioner", r.provisioner)
 			continue
 		}
 
 		if IsRateLimited(pod, now, r.cooldown) {
-			klog.InfoS("rate limited stale mount recovery", "pod", pod.Namespace+"/"+pod.Name)
+			klog.V(2).InfoS("rate limited stale mount recovery", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
 
@@ -155,12 +173,14 @@ func (r *Reconciler) ReconcileStaleMounts(ctx context.Context, stale []StaleMoun
 			"pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath, "reason", reason,
 		)
 
-		if err := r.restartPod(ctx, pod, now); err != nil {
+		msg := fmt.Sprintf("stale CSI mount %s: %s", mount.MountPath, reason)
+		if err := r.restartPod(ctx, pod, now, EventReasonStaleCSIMount, msg); err != nil {
 			klog.ErrorS(err, "failed to restart pod for stale mount", "pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath)
 			continue
 		}
 
-		klog.InfoS("restarted pod for stale CSI mount", "pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath)
+		klog.InfoS("restarted pod for stale CSI mount",
+			"pod", pod.Namespace+"/"+pod.Name, "path", mount.MountPath, "reason", reason)
 	}
 
 	return nil
@@ -233,20 +253,37 @@ func (r *Reconciler) ReconcileWorkloadPodsAfterCSIRestart(ctx context.Context) e
 		if ShouldSkipPod(pod) {
 			continue
 		}
-		if !podHasProvisionerVolume(ctx, r.client, pod, r.provisioner) {
+		if !r.podUsesProvisioner(ctx, pod) {
 			continue
 		}
 		if IsRateLimited(pod, now, r.cooldown) {
-			klog.InfoS("rate limited CSI restart recovery", "pod", pod.Namespace+"/"+pod.Name)
+			klog.V(2).InfoS("rate limited CSI restart recovery", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
-		if err := r.restartPod(ctx, pod, now); err != nil {
+		msg := fmt.Sprintf("CSI node pod restarted on node %s; refreshing volume binds", r.nodeName)
+		if err := r.restartPod(ctx, pod, now, EventReasonCSINodeUIDChanged, msg); err != nil {
 			klog.ErrorS(err, "failed to restart pod after CSI node restart", "pod", pod.Namespace+"/"+pod.Name)
 			continue
 		}
 		klog.InfoS("restarted pod after CSI node restart", "pod", pod.Namespace+"/"+pod.Name)
 	}
 	return nil
+}
+
+func (r *Reconciler) volumeManagedByProvisioner(ctx context.Context, pod *corev1.Pod, mount StaleMount) bool {
+	if managed, known := CSIMountManagedBy(mount.MountPath, r.provisioner); known {
+		return managed
+	}
+	return podUsesProvisionerVolume(ctx, r.client, pod, mount.VolumeName, r.provisioner)
+}
+
+func (r *Reconciler) podUsesProvisioner(ctx context.Context, pod *corev1.Pod) bool {
+	if r.kubeletDir != "" {
+		if has, known := PodHasLocalProvisionerVolume(r.kubeletDir, string(pod.UID), r.provisioner); known {
+			return has
+		}
+	}
+	return podHasProvisionerVolume(ctx, r.client, pod, r.provisioner)
 }
 
 func podHasProvisionerVolume(
@@ -281,7 +318,7 @@ func podHasProvisionerVolume(
 	return false
 }
 
-func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.Time) error {
+func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.Time, reason, message string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -290,6 +327,10 @@ func (r *Reconciler) restartPod(ctx context.Context, pod *corev1.Pod, now time.T
 		pod.Annotations = map[string]string{}
 	}
 	pod.Annotations[RecoveryAnnotation] = now.UTC().Format(time.RFC3339)
+
+	if r.recorder != nil {
+		r.recorder.Event(pod, corev1.EventTypeWarning, reason, message)
+	}
 
 	if _, err := r.client.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("annotate pod before restart: %w", err)

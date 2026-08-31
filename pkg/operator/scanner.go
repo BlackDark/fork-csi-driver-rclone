@@ -53,6 +53,7 @@ type StaleMount struct {
 	PodUID     string
 	VolumeName string
 	MountPath  string
+	Reason     string
 }
 
 // ParseCSIMountPath extracts pod UID and volume name from a kubelet CSI mount path.
@@ -90,7 +91,8 @@ func ParseCSIMountPath(path string) (podUID, volumeName string, ok bool) {
 }
 
 // ScanStaleMounts walks kubelet pod volumes and returns CSI mounts that fail health checks.
-func ScanStaleMounts(kubeletDir string, mounter mount.Interface) ([]StaleMount, error) {
+// When provisioner is non-empty, only volumes whose vol_data.json driverName matches are probed.
+func ScanStaleMounts(kubeletDir string, mounter mount.Interface, provisioner string) ([]StaleMount, error) {
 	podsDir := filepath.Join(kubeletDir, "pods")
 	var stale []StaleMount
 
@@ -113,6 +115,21 @@ func ScanStaleMounts(kubeletDir string, mounter mount.Interface) ([]StaleMount, 
 			return filepath.SkipDir
 		}
 
+		if provisioner != "" {
+			managed, known := CSIMountManagedBy(path, provisioner)
+			switch {
+			case known && !managed:
+				klog.V(4).InfoS("skipping CSI mount not managed by provisioner",
+					"path", path, "podUID", podUID, "volume", volumeName, "provisioner", provisioner)
+				return filepath.SkipDir
+			case !known && !IsRcloneFUSEMount(mounter, path):
+				// No vol_data.json (e.g. synthetic orphan inject): only probe fuse.rclone.
+				klog.V(4).InfoS("skipping CSI mount without vol_data and not fuse.rclone",
+					"path", path, "podUID", podUID, "volume", volumeName)
+				return filepath.SkipDir
+			}
+		}
+
 		corrupted, reason := mountPathCorruptedProbe(path)
 		if corrupted {
 			klog.V(3).InfoS("found stale CSI mount", "path", path, "podUID", podUID, "volume", volumeName, "reason", reason)
@@ -120,6 +137,7 @@ func ScanStaleMounts(kubeletDir string, mounter mount.Interface) ([]StaleMount, 
 				PodUID:     podUID,
 				VolumeName: volumeName,
 				MountPath:  path,
+				Reason:     reason,
 			})
 		}
 		return filepath.SkipDir

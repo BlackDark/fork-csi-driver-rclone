@@ -18,6 +18,8 @@ package operator
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,7 +27,9 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 )
 
 func TestShouldSkipPod(t *testing.T) {
@@ -297,4 +301,94 @@ func TestReconcileStaleMountsNoAbortKillWhenUmountFails(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, abortCalled)
 	assert.False(t, killCalled)
+}
+
+func TestReconcileStaleMountsEmitsEventBeforeDelete(t *testing.T) {
+	provisioner := "rclone.csi.veloxpack.io"
+	mountPath := filepath.Join(t.TempDir(), "pods", "live-uid", "volumes", "kubernetes.io~csi", "data", "mount")
+	require.NoError(t, os.MkdirAll(filepath.Dir(mountPath), 0o755))
+	require.NoError(t, writeVolData(filepath.Dir(mountPath), provisioner))
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: "default", UID: "live-uid"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					CSI: &corev1.CSIVolumeSource{Driver: provisioner},
+				},
+			}},
+		},
+	}
+	client := fake.NewSimpleClientset(pod)
+	recorder := record.NewFakeRecorder(4)
+	r := NewReconciler(client, "node-1", provisioner)
+	r.SetEventRecorder(recorder)
+	r.confirmCorrupted = func(string) (bool, string) {
+		return true, "mount point corrupted: input/output error"
+	}
+
+	err := r.ReconcileStaleMounts(context.Background(), []StaleMount{{
+		PodUID: "live-uid", VolumeName: "data", MountPath: mountPath, Reason: "io error",
+	}})
+	require.NoError(t, err)
+
+	_, err = client.CoreV1().Pods("default").Get(context.Background(), "writer", metav1.GetOptions{})
+	assert.Error(t, err)
+
+	select {
+	case evt := <-recorder.Events:
+		assert.Contains(t, evt, corev1.EventTypeWarning)
+		assert.Contains(t, evt, EventReasonStaleCSIMount)
+		assert.Contains(t, evt, mountPath)
+	case <-time.After(time.Second):
+		t.Fatal("expected StaleCSIMount event")
+	}
+}
+
+func TestReconcileWorkloadPodsAfterCSIRestartUsesLocalVolData(t *testing.T) {
+	provisioner := "rclone.csi.veloxpack.io"
+	kubeletDir := t.TempDir()
+	podUID := "aaaa-bbbb"
+	volDir := filepath.Join(kubeletDir, "pods", podUID, "volumes", csiVolumeDirSegment, "data")
+	require.NoError(t, os.MkdirAll(volDir, 0o755))
+	require.NoError(t, writeVolData(volDir, provisioner))
+
+	ours := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: "default", UID: types.UID(podUID)},
+		Spec:       corev1.PodSpec{NodeName: "node-1"},
+	}
+	foreign := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "media", Namespace: "media", UID: "cccc-dddd"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Volumes: []corev1.Volume{{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "media-data"},
+				},
+			}},
+		},
+	}
+	client := fake.NewSimpleClientset(ours, foreign)
+	recorder := record.NewFakeRecorder(4)
+	r := NewReconciler(client, "node-1", provisioner)
+	r.SetKubeletDir(kubeletDir)
+	r.SetEventRecorder(recorder)
+
+	err := r.ReconcileWorkloadPodsAfterCSIRestart(context.Background())
+	require.NoError(t, err)
+
+	_, err = client.CoreV1().Pods("default").Get(context.Background(), "writer", metav1.GetOptions{})
+	assert.Error(t, err)
+	_, err = client.CoreV1().Pods("media").Get(context.Background(), "media", metav1.GetOptions{})
+	require.NoError(t, err)
+
+	select {
+	case evt := <-recorder.Events:
+		assert.Contains(t, evt, EventReasonCSINodeUIDChanged)
+	case <-time.After(time.Second):
+		t.Fatal("expected CSINodeUIDChanged event")
+	}
 }

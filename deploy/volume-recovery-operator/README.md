@@ -45,13 +45,14 @@ Abort and kill run **only** for orphan publish paths whose pod UID is absent fro
 CSI-UID recovery and stale-mount scanning run on **separate goroutines/tickers** so a hung FUSE probe cannot starve restart detection.
 
 1. Watch local CSI node pod (`app=csi-rclone-node`); on restart, wait Ready, then restart workload pods using rclone volumes on this node
-2. Walk `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount` (probe timed out → corrupted; never descend into FUSE trees)
+2. Walk `/var/lib/kubelet/pods/*/volumes/kubernetes.io~csi/*/mount`, filter to this `--provisioner` via kubelet `vol_data.json` (or `fuse.rclone` fallback when `vol_data.json` is missing), then probe (timeout → corrupted; never descend into FUSE trees)
 3. Match mount pod UID to pods scheduled on this node
 4. If pod UID is gone: resolve FUSE conn id from mountinfo → lazy-umount (`MNT_DETACH`) → abort FUSE conn → best-effort kill mount process
 5. Skip `kube-system`, pods named `*csi-rclone*`, and CSI DaemonSet pods
 6. Rate limit: at most one recovery delete per pod per hour (`volume.veloxpack.io/last-recovery` annotation)
-7. Delete the pod (grace period 0) so controllers recreate it with fresh mounts
+7. Emit a Warning Event on the Pod (`StaleCSIMount` or `CSINodeUIDChanged`) describing why, then delete the pod (grace period 0) so controllers recreate it with fresh mounts
 
+Ownership checks prefer node-local `vol_data.json` so foreign CSI volumes do not generate API GETs or mount probes.
 ## Uninstall
 
 ```bash

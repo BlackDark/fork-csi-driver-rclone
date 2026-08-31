@@ -90,7 +90,7 @@ func TestScanStaleMountsSkipsNonCorruptFileMount(t *testing.T) {
 	require.NoError(t, os.WriteFile(mountPath, []byte("x"), 0o644))
 
 	mounter := mount.New("" /* mounterPath */)
-	stale, err := ScanStaleMounts(kubeletDir, mounter)
+	stale, err := ScanStaleMounts(kubeletDir, mounter, "")
 	require.NoError(t, err)
 	assert.Empty(t, stale)
 }
@@ -101,7 +101,7 @@ func TestScanStaleMountsSkipsHealthyPaths(t *testing.T) {
 	require.NoError(t, os.MkdirAll(mountPath, 0o755))
 
 	mounter := mount.New("" /* mounterPath */)
-	stale, err := ScanStaleMounts(kubeletDir, mounter)
+	stale, err := ScanStaleMounts(kubeletDir, mounter, "")
 	require.NoError(t, err)
 	assert.Empty(t, stale)
 }
@@ -124,7 +124,7 @@ func TestScanStaleMountsDetectsCorruptedDirectoryMount(t *testing.T) {
 	}
 	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
 
-	stale, err := ScanStaleMounts(kubeletDir, mount.New(""))
+	stale, err := ScanStaleMounts(kubeletDir, mount.New(""), "")
 	require.NoError(t, err)
 	require.Len(t, stale, 1)
 	assert.Equal(t, podUID, stale[0].PodUID)
@@ -158,7 +158,7 @@ func TestScanStaleMountsHungProbeDoesNotBlockForever(t *testing.T) {
 	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
 
 	start := time.Now()
-	stale, err := ScanStaleMounts(kubeletDir, mount.New(""))
+	stale, err := ScanStaleMounts(kubeletDir, mount.New(""), "")
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 	require.Len(t, stale, 1)
@@ -180,9 +180,65 @@ func TestScanStaleMountsPreservesSkipDir(t *testing.T) {
 	}
 	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
 
-	stale, err := ScanStaleMounts(kubeletDir, mount.New(""))
+	stale, err := ScanStaleMounts(kubeletDir, mount.New(""), "")
 	require.NoError(t, err)
 	assert.Empty(t, stale)
 	require.Len(t, probed, 1)
 	assert.Equal(t, mountPath, probed[0])
+}
+
+func TestScanStaleMountsSkipsForeignProvisionerBeforeProbe(t *testing.T) {
+	kubeletDir := t.TempDir()
+	ours := filepath.Join(kubeletDir, "pods", "pod-a", "volumes", "kubernetes.io~csi", "rclone-vol", "mount")
+	foreign := filepath.Join(kubeletDir, "pods", "pod-b", "volumes", "kubernetes.io~csi", "other-vol", "mount")
+	require.NoError(t, os.MkdirAll(ours, 0o755))
+	require.NoError(t, os.MkdirAll(foreign, 0o755))
+	require.NoError(t, writeVolData(filepath.Dir(ours), "rclone.csi.veloxpack.io"))
+	require.NoError(t, writeVolData(filepath.Dir(foreign), "ebs.csi.aws.com"))
+
+	var probed []string
+	oldProbe := mountPathCorruptedProbe
+	mountPathCorruptedProbe = func(path string) (bool, string) {
+		probed = append(probed, path)
+		return true, "corrupted"
+	}
+	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
+
+	stale, err := ScanStaleMounts(kubeletDir, mount.New(""), "rclone.csi.veloxpack.io")
+	require.NoError(t, err)
+	require.Len(t, stale, 1)
+	assert.Equal(t, ours, stale[0].MountPath)
+	assert.Equal(t, []string{ours}, probed)
+}
+
+func TestScanStaleMountsProbesOrphanWithoutVolDataWhenFuseRclone(t *testing.T) {
+	kubeletDir := t.TempDir()
+	orphan := filepath.Join(kubeletDir, "pods", "deadbeef", "volumes", "kubernetes.io~csi", "orphan-vol", "mount")
+	foreign := filepath.Join(kubeletDir, "pods", "other", "volumes", "kubernetes.io~csi", "disk", "mount")
+	require.NoError(t, os.MkdirAll(orphan, 0o755))
+	require.NoError(t, os.MkdirAll(foreign, 0o755))
+
+	fake := &mount.FakeMounter{MountPoints: []mount.MountPoint{
+		{Device: "rustfs:bucket", Path: orphan, Type: "fuse.rclone"},
+		{Device: "/dev/sda1", Path: foreign, Type: "ext4"},
+	}}
+
+	var probed []string
+	oldProbe := mountPathCorruptedProbe
+	mountPathCorruptedProbe = func(path string) (bool, string) {
+		probed = append(probed, path)
+		return true, "mount probe timed out"
+	}
+	t.Cleanup(func() { mountPathCorruptedProbe = oldProbe })
+
+	stale, err := ScanStaleMounts(kubeletDir, fake, "rclone.csi.veloxpack.io")
+	require.NoError(t, err)
+	require.Len(t, stale, 1)
+	assert.Equal(t, orphan, stale[0].MountPath)
+	assert.Equal(t, []string{orphan}, probed)
+}
+
+func writeVolData(volumeDir, driverName string) error {
+	data := []byte(`{"driverName":"` + driverName + `"}`)
+	return os.WriteFile(filepath.Join(volumeDir, "vol_data.json"), data, 0o644)
 }
