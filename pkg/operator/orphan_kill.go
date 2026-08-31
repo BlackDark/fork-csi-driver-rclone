@@ -16,10 +16,7 @@ limitations under the License.
 
 package operator
 
-import (
-	"bytes"
-	"path/filepath"
-)
+import "bytes"
 
 // ShouldKillOrphanMountProcess reports whether best-effort kill of a hung mount
 // server is allowed. Only when the pod UID is gone — never for live CSI mounts.
@@ -39,13 +36,8 @@ func MatchMountServerCmdline(cmdline []byte, publishPath string) bool {
 	if publishPath == "" || len(cmdline) == 0 {
 		return false
 	}
-	clean := filepath.Clean(publishPath)
 	for _, arg := range bytes.Split(cmdline, []byte{0}) {
-		if len(arg) == 0 {
-			continue
-		}
-		path := string(arg)
-		if path == publishPath || filepath.Clean(path) == clean {
+		if bytes.Equal(arg, []byte(publishPath)) {
 			return true
 		}
 	}

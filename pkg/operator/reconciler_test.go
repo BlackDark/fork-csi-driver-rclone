@@ -123,8 +123,9 @@ func TestPruneExpiredRecoveries(t *testing.T) {
 		"default/Pod/expired": now.Add(-time.Hour),
 		"default/Pod/recent":  now.Add(-time.Minute),
 	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "expired", Namespace: "default"}}
 
-	r.pruneExpiredRecoveries(now)
+	assert.False(t, r.isRateLimited(context.Background(), pod, now))
 	assert.Equal(t, map[string]time.Time{"default/Pod/recent": now.Add(-time.Minute)}, r.lastRecovery)
 }
 func TestRestartPodDoesNotRecordFailedDelete(t *testing.T) {

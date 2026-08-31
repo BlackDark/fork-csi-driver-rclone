@@ -437,6 +437,7 @@ func RecoveryKey(pod *corev1.Pod) string {
 
 func (r *Reconciler) isRateLimited(ctx context.Context, pod *corev1.Pod, now time.Time) bool {
 	r.mu.Lock()
+	r.pruneExpiredRecoveriesLocked(now)
 	last, ok := r.lastRecovery[RecoveryKey(pod)]
 	cooldown := r.cooldown
 	r.mu.Unlock()
@@ -452,12 +453,6 @@ func (r *Reconciler) markRecoveredLocked(pod *corev1.Pod, now time.Time) {
 	}
 	r.pruneExpiredRecoveriesLocked(now)
 	r.lastRecovery[RecoveryKey(pod)] = now
-}
-
-func (r *Reconciler) pruneExpiredRecoveries(now time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.pruneExpiredRecoveriesLocked(now)
 }
 
 func (r *Reconciler) pruneExpiredRecoveriesLocked(now time.Time) {

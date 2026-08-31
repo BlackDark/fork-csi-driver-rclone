@@ -101,6 +101,7 @@ func TestMatchMountServerCmdline(t *testing.T) {
 	assert.False(t, MatchMountServerCmdline(nil, path))
 
 	assert.False(t, MatchMountServerCmdline([]byte("rclone\x00mount\x00"+path+"-old\x00"), path))
+	assert.False(t, MatchMountServerCmdline([]byte("rclone\x00mount\x00"+path+"/.\x00"), path))
 	assert.False(t, MatchMountServerCmdline([]byte("rclone\x00--cache-dir="+path+"\x00"), path))
 }
 
