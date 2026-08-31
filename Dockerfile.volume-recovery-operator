@@ -17,7 +17,7 @@ RUN for arch in amd64 arm64; do \
       cmd/volume-recovery-operator/main.go; \
     done
 
-FROM --platform=$TARGETPLATFORM registry.k8s.io/build-image/debian-base:bookworm-v1.0.7
+FROM registry.k8s.io/build-image/debian-base:bookworm-v1.0.7
 ARG TARGETARCH
 COPY --from=builder /workspace/volume-recovery-operator.${TARGETARCH} /volume-recovery-operator
 ENTRYPOINT ["/volume-recovery-operator"]

@@ -49,7 +49,7 @@ RUN RCLONE_VERSION=$(awk '/^[[:space:]]+github\.com\/rclone\/rclone v/{print $2;
     done
 
 # Runtime image for the target platform only (matching binary copied from builder).
-FROM --platform=$TARGETPLATFORM registry.k8s.io/build-image/debian-base:bookworm-v1.0.8
+FROM registry.k8s.io/build-image/debian-base:bookworm-v1.0.8
 ARG TARGETARCH
 WORKDIR /
 
