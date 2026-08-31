@@ -12,7 +12,7 @@ delete_e2e_workloads() {
   kubectl delete deploy e2e-writer e2e-writer-propagated minio -n "$NS" \
     --ignore-not-found --cascade=foreground --wait=true --timeout=2m
   kubectl delete pod e2e-bad-creds-pod -n "$NS" \
-    --ignore-not-found --wait=true --timeout=2m
+    --ignore-not-found --force --grace-period=0 --wait=false
   kubectl delete ds volume-recovery-operator -n "$NS" \
     --ignore-not-found --cascade=foreground --wait=true --timeout=2m
 }
