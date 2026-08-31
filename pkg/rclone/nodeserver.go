@@ -1193,7 +1193,10 @@ func (ns *NodeServer) nodePublishVolumeStaged(
 	}
 	defer release()
 
-	stagingPath := ns.getStagingPathForPublish(ctx, volumeID)
+	stagingPath := req.GetStagingTargetPath()
+	if stagingPath == "" {
+		stagingPath = ns.getStagingPathForPublish(ctx, volumeID)
+	}
 	healthy, _ := ns.stageMountHealthy(stagingPath)
 	if ns.getStagedVolume(volumeID) == nil || !healthy {
 		if !healthy {
