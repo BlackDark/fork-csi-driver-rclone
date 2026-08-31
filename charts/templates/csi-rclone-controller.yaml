@@ -28,7 +28,7 @@ spec:
       {{- else }}
       nodeSelector:
         kubernetes.io/os: linux
-        {{- if and (not .Values.controller.runOnControlPlane) .Values.controller.nodeSelector }}
+        {{- if .Values.controller.nodeSelector }}
         {{- toYaml .Values.controller.nodeSelector | nindent 8 }}
         {{- end }}
       {{- end }}
