@@ -1,4 +1,9 @@
 
+> [!CAUTION]
+> **This repository is archived and no longer maintained.**
+> It is superseded by **[BlackDark/csi-driver-rclone](https://github.com/BlackDark/csi-driver-rclone)**.
+> Please use that repository instead.
+
 <h1 align="center">
   <a href="https://www.veloxpack.io/docs/csi-driver-rclone">
     <img src=".github/banner.png" alt="Rclone CSI Driver for Kubernetes" width="100%">
